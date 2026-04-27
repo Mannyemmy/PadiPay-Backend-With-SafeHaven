@@ -1,0 +1,9 @@
+{
+  "scripts": {
+    "deploy:getanchor": "powershell -ExecutionPolicy Bypass -File ./scripts/deploy-getanchor.ps1"
+  },
+  "dependencies": {
+    "@aws-sdk/client-ses": "^3.1008.0",
+    "crypto": "^1.0.1"
+  }
+}

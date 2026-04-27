@@ -1,0 +1,11 @@
+{
+  "version": "1.0",
+  "apis": [
+    {
+      "identifier": "getanchor",
+      "source": "@getanchor/v1.0#5rfsybljo1h926",
+      "integrity": "sha512-TXsJqNTmGq6LHxti2d5JKocWN6M7I0LB3X2NSHKBYM0zs6swBRto5oAEBHXFo+EFDNyr3+mZsFfS+WRcGT1WFw==",
+      "installerVersion": "6.1.3"
+    }
+  ]
+}
