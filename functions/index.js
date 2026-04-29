@@ -34,6 +34,9 @@ const qoreIdClientId = defineSecret("QOREID_CLIENT_ID");
 const safehavenClientId = defineSecret("SAFEHAVEN_CLIENT_ID");
 const safehavenPrivateKey = defineSecret("SAFEHAVEN_PRIVATE_KEY"); // RS256 PEM private key
 const safehavenCompanyUrl = defineSecret("SAFEHAVEN_COMPANY_URL"); // e.g. https://yourcompany.com
+const safehavenDebitAccountNumber = defineSecret("SAFEHAVEN_DEBIT_ACCOUNT_NUMBER");
+// SafeHaven webhook secret removed: SafeHaven does not require HMAC verification
+// const safehavenWebhookSecret = defineSecret("SAFEHAVEN_WEBHOOK_SECRET");
 // Use sandbox URL for all Getanchor API calls
 // Update BASE_URL here if switching to live environment
 const BASE_URL = "https://api.getanchor.co/api/v1";
@@ -84,6 +87,20 @@ app.use(
     },
   }),
 );
+
+// Separate Express app for SafeHaven webhooks (exposed as its own function)
+const safehavenApp = express();
+safehavenApp.use(cors({ origin: true }));
+safehavenApp.use(
+  express.json({
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    },
+  }),
+);
+
+// Export SafeHaven webhook as a separate Cloud Function
+exports.safehavenWebhook = onRequest(safehavenApp);
 
 const sendViaSMTP = async ({ to, subject, html, text, replyTo }) => {
   const host = smtpHost.value();
@@ -1545,6 +1562,38 @@ const generateBusinessSuperAgentCode = async () => {
 let _anchorKeyOverrideCache = null;
 let _anchorKeyOverrideFetchedAt = 0;
 const _ANCHOR_KEY_CACHE_TTL_MS = 60000; // 1 minute
+let _anchorLegacyEnabledCache = null;
+let _anchorLegacyEnabledFetchedAt = 0;
+
+const _isAnchorLegacyEnabled = async () => {
+  const now = Date.now();
+  if (now - _anchorLegacyEnabledFetchedAt < _ANCHOR_KEY_CACHE_TTL_MS) {
+    return Boolean(_anchorLegacyEnabledCache);
+  }
+
+  try {
+    const doc = await db.collection("appConfig").doc("anchor").get();
+    const legacyEnabled = Boolean(doc.exists && doc.data()?.legacyEnabled === true);
+    _anchorLegacyEnabledCache = legacyEnabled;
+    _anchorLegacyEnabledFetchedAt = now;
+    return legacyEnabled;
+  } catch (e) {
+    console.warn("Failed to read anchor legacyEnabled flag. Defaulting to disabled:", e.message);
+    _anchorLegacyEnabledCache = false;
+    _anchorLegacyEnabledFetchedAt = now;
+    return false;
+  }
+};
+
+const _assertAnchorLegacyEnabled = async () => {
+  const enabled = await _isAnchorLegacyEnabled();
+  if (!enabled) {
+    throw new HttpsError(
+      "failed-precondition",
+      "Legacy Anchor endpoints are disabled. Set appConfig/anchor.legacyEnabled=true to temporarily enable them.",
+    );
+  }
+};
 
 // Returns { key, baseUrl } ? sandbox when Firestore override present, live otherwise
 const _resolveAnchorKey = async (fallback) => {
@@ -1576,6 +1625,8 @@ const makeApiRequest = async ({
   body = null,
   idempotencyKey = null,
 }) => {
+  await _assertAnchorLegacyEnabled();
+
   const { key: resolvedKey, baseUrl: resolvedBaseUrl } = await _resolveAnchorKey(secretKey);
   // Support absolute URLs and relative endpoint paths (e.g. "/bills").
   const normalizedUrl = String(url || "").trim();
@@ -1655,19 +1706,330 @@ const makeApiRequest = async ({
   }
 };
 
-// Create Getanchor User
-exports.createGetanchorUser = onCall(
-  { secrets: [getanchorSecretKey] },
+// ============================================================
+// Safe Haven MFB API helpers
+// ============================================================
+const SAFEHAVEN_PROD_BASE_URL = "https://api.safehavenmfb.com";
+const SAFEHAVEN_SANDBOX_BASE_URL = "https://api.sandbox.safehavenmfb.com";
+const _SAFEHAVEN_CONFIG_CACHE_TTL_MS = 60000;
+
+let _safehavenConfigCache = null;
+let _safehavenConfigFetchedAt = 0;
+let _safehavenTokenCache = null;
+let _safehavenTokenCacheKey = null;
+let _safehavenTokenExpiresAt = 0;
+
+const _resolveSafehavenConfig = async () => {
+  const now = Date.now();
+  if (
+    _safehavenConfigCache &&
+    now - _safehavenConfigFetchedAt < _SAFEHAVEN_CONFIG_CACHE_TTL_MS
+  ) {
+    return _safehavenConfigCache;
+  }
+
+  const prodClientId = safehavenClientId.value();
+  const privateKeyPem = safehavenPrivateKey.value();
+  const companyUrl = safehavenCompanyUrl.value();
+
+  if (!prodClientId || !privateKeyPem || !companyUrl) {
+    throw new HttpsError("internal", "Safe Haven credentials are not configured");
+  }
+
+  let sandboxClientId = "";
+  try {
+    const doc = await db.collection("appConfig").doc("safehaven").get();
+    sandboxClientId = doc.exists ? String(doc.data()?.sandboxClientId || "").trim() : "";
+  } catch (e) {
+    console.warn(
+      "Failed to read Safehaven sandbox client id from Firestore, using prod:",
+      e.message,
+    );
+  }
+
+  const resolvedConfig = {
+    clientId: sandboxClientId || prodClientId,
+    privateKeyPem,
+    companyUrl,
+    baseUrl: sandboxClientId ? SAFEHAVEN_SANDBOX_BASE_URL : SAFEHAVEN_PROD_BASE_URL,
+    mode: sandboxClientId ? "sandbox" : "prod",
+  };
+
+  _safehavenConfigCache = resolvedConfig;
+  _safehavenConfigFetchedAt = now;
+  return resolvedConfig;
+};
+
+const _getSafehavenDebitAccountConfig = async () => {
+  const config = await _resolveSafehavenConfig();
+
+  if (config.mode === "prod") {
+    const prodDebitAccount = String(safehavenDebitAccountNumber.value() || "").trim();
+    return {
+      mode: config.mode,
+      source: prodDebitAccount ? "secret" : "none",
+      debitAccountNumber: prodDebitAccount,
+    };
+  }
+
+  try {
+    const doc = await db.collection("appConfig").doc("safehaven").get();
+    const sandboxDebitAccountNumber = doc.exists ? String(doc.data()?.sandboxDebitAccountNumber || "").trim() : "";
+    return {
+      mode: config.mode,
+      source: sandboxDebitAccountNumber ? "appConfig.safehaven.sandboxDebitAccountNumber" : "sandbox-default",
+      debitAccountNumber: sandboxDebitAccountNumber || "0104610514",
+    };
+  } catch (e) {
+    console.warn(
+      "Failed to read Safehaven sandbox debit account from Firestore, using default:",
+      e.message,
+    );
+    return {
+      mode: config.mode,
+      source: "sandbox-default",
+      debitAccountNumber: "0104610514",
+    };
+  }
+};
+
+/**
+ * Builds a signed RS256 JWT for the Safehaven client_assertion flow.
+ */
+const _buildSafehavenJwt = (clientId, privateKeyPem, baseUrl) => {
+  const headerJson = JSON.stringify({ alg: "RS256", typ: "JWT" });
+  const now = Math.floor(Date.now() / 1000);
+  const payloadJson = JSON.stringify({
+    iss: clientId,
+    sub: clientId,
+    aud: baseUrl,
+    iat: now,
+    exp: now + 300,
+    jti: crypto.randomUUID(),
+  });
+  const header = Buffer.from(headerJson).toString("base64url");
+  const payload = Buffer.from(payloadJson).toString("base64url");
+  const signingInput = `${header}.${payload}`;
+  const signer = crypto.createSign("RSA-SHA256");
+  signer.update(signingInput, "utf8");
+  const signature = signer.sign(privateKeyPem, "base64url");
+  return `${signingInput}.${signature}`;
+};
+
+/**
+ * Fetches (and caches) a Safehaven OAuth2 access token using the
+ * JWT client-credentials grant.
+ */
+const _getSafehavenToken = async () => {
+  const now = Date.now();
+  const config = await _resolveSafehavenConfig();
+  const cacheKey = `${config.baseUrl}|${config.clientId}`;
+
+  if (
+    _safehavenTokenCache &&
+    _safehavenTokenCacheKey === cacheKey &&
+    now < _safehavenTokenExpiresAt - 60000
+  ) {
+    return {
+      accessToken: _safehavenTokenCache,
+      clientId: config.clientId,
+      baseUrl: config.baseUrl,
+      mode: config.mode,
+    };
+  }
+  const clientAssertion = _buildSafehavenJwt(
+    config.clientId,
+    config.privateKeyPem,
+    config.baseUrl,
+  );
+  const params = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+    client_assertion: clientAssertion,
+    client_id: config.clientId,
+  });
+  const tokenUrl = `${config.baseUrl}/oauth2/token`;
+  console.log("[SafeHaven] OAuth request", {
+    url: tokenUrl,
+    mode: config.mode,
+    grant_type: "client_credentials",
+    hasClientId: Boolean(config.clientId),
+    hasPrivateKey: Boolean(config.privateKeyPem),
+    assertionLength: clientAssertion ? String(clientAssertion).length : 0,
+  });
+
+  const response = await fetch(tokenUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: params.toString(),
+  });
+  const text = await response.text();
+  console.log("[SafeHaven] OAuth response", {
+    url: tokenUrl,
+    status: response.status,
+    body: text.slice(0, 1000),
+  });
+  if (!response.ok) {
+    console.error("[SafeHaven] token error:", {
+      url: tokenUrl,
+      status: response.status,
+      body: text.slice(0, 1000),
+    });
+    _safehavenTokenCache = null;
+    _safehavenTokenCacheKey = null;
+    _safehavenTokenExpiresAt = 0;
+    throw new HttpsError("internal", `SafeHaven OAuth failed (${response.status}): ${text}`);
+  }
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch (e) {
+    console.error('[SafeHaven] token parse error', { status: response.status, body: text });
+    throw new HttpsError('internal', `SafeHaven OAuth parse error: ${e.message}`);
+  }
+
+  if (!json || !json.access_token) {
+    console.error('[SafeHaven] token error (no access_token)', { status: response.status, body: text });
+    _safehavenTokenCache = null;
+    _safehavenTokenCacheKey = null;
+    _safehavenTokenExpiresAt = 0;
+    throw new HttpsError('internal', `SafeHaven OAuth failed (${response.status}): ${text}`);
+  }
+
+  _safehavenTokenCache = json.access_token;
+  _safehavenTokenCacheKey = cacheKey;
+  _safehavenTokenExpiresAt = now + (json.expires_in || 3600) * 1000;
+  return {
+    accessToken: _safehavenTokenCache,
+    clientId: config.clientId,
+    baseUrl: config.baseUrl,
+    mode: config.mode,
+  };
+};
+
+/**
+ * Makes an authenticated request to the Safe Haven MFB API.
+ * Always includes Authorization: Bearer <token> and ClientID header.
+ */
+const safehavenRequest = async ({ path, method = "GET", body = null }) => {
+  const { accessToken, clientId, baseUrl, mode } = await _getSafehavenToken();
+  const url = `${baseUrl}${path}`;
+  const headers = {
+    Accept: "application/json",
+    Authorization: `Bearer ${accessToken}`,
+    ClientID: clientId,
+  };
+  if (method === "POST" || method === "PUT" || method === "PATCH") {
+    headers["Content-Type"] = "application/json";
+  }
+  const options = { method, headers };
+  if (body) options.body = JSON.stringify(body);
+  console.log(
+    `[SafeHaven] ${mode} ${method} ${url}`,
+    body ? JSON.stringify(body).slice(0, 400) : "",
+  );
+  const response = await fetch(url, options);
+  const text = await response.text();
+  console.log(`[SafeHaven] ${response.status} ${url}:`, text.slice(0, 600));
+  if (!response.ok) {
+    throw new HttpsError("internal", `SafeHaven API ${response.status}: ${text.slice(0, 300)}`);
+  }
+  const parsed = JSON.parse(text);
+  // SafeHaven sometimes returns HTTP 2xx with an error statusCode in the body
+  if (parsed && typeof parsed.statusCode === "number" && parsed.statusCode >= 400) {
+    throw new HttpsError("internal", `SafeHaven API ${parsed.statusCode}: ${text.slice(0, 300)}`);
+  }
+  return parsed;
+};
+
+// Adds consistent logs for callable entry/success/error so app issues can be
+// traced quickly in Cloud Functions logs.
+const onCallLogged = (functionName, options, handler) =>
+  onCall(options, async (data, context) => {
+    const payload = data?.data && typeof data.data === "object" ? data.data : {};
+    const traceId =
+      payload?.idempotencyKey ||
+      payload?.reference ||
+      payload?.paymentReference ||
+      `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const uid = data?.auth?.uid || "anonymous";
+    console.log(`[CF:${functionName}] start`, {
+      uid,
+      traceId,
+      payloadKeys: Object.keys(payload),
+    });
+    try {
+      const result = await handler(data, context);
+      console.log(`[CF:${functionName}] success`, { uid, traceId });
+      return result;
+    } catch (err) {
+      console.error(`[CF:${functionName}] error`, {
+        uid,
+        traceId,
+        code: err?.code,
+        message: err?.message,
+      });
+      throw err;
+    }
+  });
+
+/**
+ * Looks up a user document in Firestore and returns the Safehaven
+ * account number and _id from getAnchorData.virtualAccount.
+ */
+const _getSafehavenAccountForUser = async (uid) => {
+  const snap = await db.collection("users").doc(uid).get();
+  if (!snap.exists) return null;
+  const va = snap.data()?.getAnchorData?.virtualAccount?.data;
+  if (!va) return null;
+  return {
+    accountId: va.id || "",
+    accountNumber: va.attributes?.accountNumber || "",
+    bankCode: va.attributes?.bank?.id || "999240",
+  };
+};
+
+/**
+ * Performs a Safehaven name enquiry and caches the nameEnquiryReference
+ * in Firestore (5-minute TTL) keyed to the caller's UID.
+ */
+const _safehavenNameEnquiry = async (uid, bankCode, accountNumber) => {
+  const resp = await safehavenRequest({
+    path: "/transfers/name-enquiry",
+    method: "POST",
+    body: {
+      bankCode: String(bankCode || "").trim(),
+      accountNumber: String(accountNumber || "").trim(),
+    },
+  });
+  // Cache the name enquiry reference
+  if (uid && resp.data?.nameEnquiryReference) {
+    const cacheKey = crypto.createHash("sha256").update(`${bankCode}:${accountNumber}`).digest("hex");
+    await db.collection("safehavenNameEnquiryCache").doc(`${uid}_${cacheKey}`).set({
+      nameEnquiryReference: resp.data.nameEnquiryReference,
+      bankCode,
+      accountNumber,
+      accountName: resp.data.accountName || resp.data.beneficiaryAccountName || "",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      expiresAtMs: Date.now() + 5 * 60 * 1000,
+    });
+  }
+  return resp.data || {};
+};
+// ============================================================
+// End Safe Haven MFB API helpers
+// ============================================================
+
+// Create Safehaven User (replaces createGetanchorUser)
+// In the Safehaven model there is no separate "customer" entity.
+// We store the user's details in Firestore for use during account creation
+// and return an Anchor-compatible placeholder so the existing app flow is unaffected.
+exports.safehavenCreateUser = onCallLogged(
+  "safehavenCreateUser",
+  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl] },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
-    const secretKey = getanchorSecretKey.value();
-    if (secretKey.length === 0) {
-      throw new HttpsError(
-        "invalid-argument",
-        "Getanchor Secret Key is not set",
-      );
-    }
-    console.log("sec key", secretKey);
+
     const requiredFields = [
       { key: "firstName", message: "First name is required" },
       { key: "lastName", message: "Last name is required" },
@@ -1676,23 +2038,8 @@ exports.createGetanchorUser = onCall(
         message: "Valid email is required",
         validator: (v) => v.includes("@"),
       },
-      {
-        key: "country",
-        message: "Country must be 'NG'",
-        validator: (v) => v === "NG",
-      },
-      { key: "state", message: "State is required" },
-      { key: "addressLine1", message: "Address line 1 is required" },
-      { key: "city", message: "City is required" },
-      { key: "postalCode", message: "Postal code is required" },
       { key: "phoneNumber", message: "Phone number is required" },
     ];
-    console.log(data.data);
-
-    const validatedData = {};
-    requiredFields.forEach(({ key }) => {
-      validatedData[key] = data.data[key];
-    });
     validateData(data.data, requiredFields);
 
     const {
@@ -1705,341 +2052,219 @@ exports.createGetanchorUser = onCall(
       city,
       postalCode,
       phoneNumber,
-    } = validatedData;
+    } = data.data;
 
-    console.log("Sending request with payload:", {
-      firstName,
-      lastName,
-      email,
-      country,
-      state,
-      addressLine1,
-      city,
-      postalCode,
-      phoneNumber,
-    });
+    const uid = data.auth?.uid;
+    if (!uid) throw new HttpsError("unauthenticated", "User is not authenticated");
 
-    const url = `${BASE_URL}/customers`;
-    const body = {
+    // Store user setup data in Firestore for use during createElectronicAccount
+    await db.collection("safehavenUserSetup").doc(uid).set({
+      firstName: firstName?.trim() || "",
+      lastName: lastName?.trim() || "",
+      email: email?.trim() || "",
+      phoneNumber: phoneNumber?.trim() || "",
+      country: country?.trim() || "NG",
+      state: state?.trim() || "",
+      addressLine1: addressLine1?.trim() || "",
+      city: city?.trim() || "",
+      postalCode: postalCode?.trim() || "",
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    // Return Anchor-compatible response ï¿½ uid is used as the "customer ID"
+    return {
       data: {
-        attributes: {
-          fullName: { firstName, lastName },
-          address: {
-            country,
-            state,
-            addressLine_1: addressLine1,
-            city,
-            postalCode,
-          },
-          email,
-          phoneNumber,
-        },
+        id: uid,
         type: "IndividualCustomer",
+        attributes: {
+          fullName: { firstName: firstName?.trim() || "", lastName: lastName?.trim() || "" },
+          email: email?.trim() || "",
+          phoneNumber: phoneNumber?.trim() || "",
+          status: "ACTIVE",
+        },
       },
     };
-
-    return makeApiRequest({ url, method: "POST", secretKey, body });
   },
 );
-// Create Getanchor Business User
-exports.createGetanchorBusinessUser = onCall(
-  { secrets: [getanchorSecretKey] },
+// Create Safehaven Business User
+exports.safehavenCreateBusinessUser = onCallLogged(
+  "safehavenCreateBusinessUser",
+  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl] },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
-    const secretKey = getanchorSecretKey.value();
-    if (secretKey.length === 0) {
-      throw new HttpsError(
-        "invalid-argument",
-        "Getanchor Secret Key is not set",
-      );
-    }
-    console.log("sec key", secretKey);
-
-    // Define required fields with validators where needed
-    const requiredFields = [
-      { key: "industry", message: "Industry is required" },
-      { key: "registrationType", message: "Registration type is required" },
-      {
-        key: "country",
-        message: "Country must be 'NG'",
-        validator: (v) => v === "NG",
-      },
+    validateData(data.data, [
       { key: "businessName", message: "Business name is required" },
-      { key: "businessBvn", message: "Business BVN is required" },
-      {
-        key: "dateOfRegistration",
-        message: "Date of registration is required",
-      },
-      { key: "description", message: "Description is required" },
       {
         key: "email",
         message: "Valid email is required",
-        validator: (v) => v.includes("@"),
-      },
-      {
-        key: "mainAddressCountry",
-        message: "Main address country must be 'NG'",
-        validator: (v) => v === "NG",
-      },
-      { key: "mainAddressState", message: "Main address state is required" },
-      { key: "mainAddressLine1", message: "Main address line 1 is required" },
-      { key: "mainAddressCity", message: "Main address city is required" },
-      {
-        key: "mainAddressPostalCode",
-        message: "Main address postal code is required",
-      },
-      {
-        key: "registeredAddressCountry",
-        message: "Registered address country must be 'NG'",
-        validator: (v) => v === "NG",
-      },
-      {
-        key: "registeredAddressState",
-        message: "Registered address state is required",
-      },
-      {
-        key: "registeredAddressLine1",
-        message: "Registered address line 1 is required",
-      },
-      {
-        key: "registeredAddressCity",
-        message: "Registered address city is required",
+        validator: (v) => typeof v === "string" && v.includes("@"),
       },
       { key: "phoneNumber", message: "Phone number is required" },
-      // Officers array validation (assuming at least one officer)
-      {
-        key: "officers",
-        message: "At least one officer is required",
-        validator: (v) => Array.isArray(v) && v.length > 0,
-      },
-    ];
+    ]);
 
-    console.log(data);
+    const uid = data.auth?.uid;
+    if (!uid) {
+      throw new HttpsError("unauthenticated", "User is not authenticated");
+    }
 
-    // Flatten and validate data (assuming data.data contains flat keys for simplicity, or adjust if nested)
-    const validatedData = {};
-    requiredFields.forEach(({ key }) => {
-      if (key === "officers") {
-        validatedData[key] = data.data[key];
-      } else {
-        const value = data.data[key];
-        validatedData[key] = typeof value === "string" ? value.trim() : value;
-      }
-    });
-    validateData(data.data, requiredFields);
+    const officers = Array.isArray(data.data.officers) ? data.data.officers : [];
+    const firstOfficer = officers[0] || {};
 
-    const {
-      industry,
-      registrationType,
-      country,
-      businessName,
-      businessBvn,
-      dateOfRegistration,
-      description,
-      email,
-      mainAddressCountry,
-      mainAddressState,
-      mainAddressLine1,
-      mainAddressCity,
-      mainAddressPostalCode,
-      registeredAddressCountry,
-      registeredAddressState,
-      registeredAddressLine1,
-      registeredAddressCity,
+    const businessName = String(data.data.businessName || "").trim();
+    const email = String(data.data.email || "").trim();
+    const phoneNumber = String(data.data.phoneNumber || "").trim();
+    const companyRegistrationNumber = String(
+      data.data.companyRegistrationNumber ||
+        data.data.registrationNumber ||
+        data.data.businessBvn ||
+        "",
+    ).trim();
+    const identityId = String(
+      data.data.identityId ||
+        firstOfficer.bvn ||
+        data.data.businessBvn ||
+        "",
+    ).trim();
+
+    const autoSweep = Boolean(data.data.autoSweep);
+    const autoSweepAccountNumber = String(data.data.autoSweepAccountNumber || "").trim();
+
+    const subAccountPayload = {
       phoneNumber,
-      officers,
-    } = validatedData;
+      emailAddress: email,
+      identityType: "BVN",
+      companyRegistrationNumber,
+      identityId,
+      autoSweep,
+      externalReference: `biz-${uid}-${Date.now()}`,
+    };
 
-    // Validate each officer's fields
-    officers.forEach((officer, index) => {
-      const officerFields = [
-        { key: "role", message: `Officer ${index + 1}: Role is required` },
-        {
-          key: "firstName",
-          message: `Officer ${index + 1}: First name is required`,
-        },
-        {
-          key: "lastName",
-          message: `Officer ${index + 1}: Last name is required`,
-        },
-        {
-          key: "nationality",
-          message: `Officer ${index + 1}: Nationality must be 'NG'`,
-          validator: (v) => v === "NG",
-        },
-        {
-          key: "addressCountry",
-          message: `Officer ${index + 1}: Address country must be 'NG'`,
-          validator: (v) => v === "NG",
-        },
-        {
-          key: "addressState",
-          message: `Officer ${index + 1}: Address state is required`,
-        },
-        {
-          key: "addressLine1",
-          message: `Officer ${index + 1}: Address line 1 is required`,
-        },
-        {
-          key: "addressCity",
-          message: `Officer ${index + 1}: Address city is required`,
-        },
-        {
-          key: "addressPostalCode",
-          message: `Officer ${index + 1}: Address postal code is required`,
-        },
-        {
-          key: "dateOfBirth",
-          message: `Officer ${index + 1}: Date of birth is required`,
-        },
-        {
-          key: "email",
-          message: `Officer ${index + 1}: Valid email is required`,
-          validator: (v) => v.includes("@"),
-        },
-        {
-          key: "phoneNumber",
-          message: `Officer ${index + 1}: Phone number is required`,
-        },
-        { key: "bvn", message: `Officer ${index + 1}: BVN is required` },
-        { key: "title", message: `Officer ${index + 1}: Title is required` },
-        {
-          key: "percentageOwned",
-          message: `Officer ${index + 1}: Percentage owned is required`,
-          validator: (v) => typeof v === "number" && v >= 0 && v <= 100,
-        },
-      ];
-      const officerData = {};
-      officerFields.forEach(({ key }) => {
-        const value = officer[key];
-        officerData[key] = typeof value === "string" ? value.trim() : value;
-      });
-      validateData(officer, officerFields);
+    if (autoSweep && autoSweepAccountNumber) {
+      subAccountPayload.autoSweepDetails = {
+        schedule: "Monthly",
+        accountNumber: autoSweepAccountNumber,
+      };
+    }
+
+    const resp = await safehavenRequest({
+      path: "/accounts/subaccount",
+      method: "POST",
+      body: subAccountPayload,
     });
 
-    console.log("Sending request with payload:", validatedData);
+    const acct = resp.data || {};
+    const accountId = acct._id || acct.id || uid;
 
-    const url = `${BASE_URL}/customers`;
-    const body = {
+    await db.collection("safehavenUserSetup").doc(uid).set({
+      safehavenAccountId: accountId,
+      safehavenAccountNumber: acct.accountNumber || "",
+      safehavenBankCode: acct.bankCode || "090286",
+      safehavenBankName: acct.bankName || "Safe Haven MFB",
+      businessProfile: {
+        businessName,
+        email,
+        phoneNumber,
+        companyRegistrationNumber,
+        identityId,
+        accountType: acct.subAccountDetails?.accountType || "Corporate",
+      },
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    return {
       data: {
+        id: uid,
+        type: "BusinessCustomer",
         attributes: {
           basicDetail: {
-            industry,
-            registrationType,
-            country,
             businessName,
-            businessBvn,
-            dateOfRegistration,
-            description,
+            registrationType: data.data.registrationType || "Corporate",
+            country: data.data.country || "NG",
+            dateOfRegistration: data.data.dateOfRegistration || null,
           },
           contact: {
             email: { general: email },
-            address: {
-              main: {
-                country: mainAddressCountry,
-                state: mainAddressState,
-                addressLine_1: mainAddressLine1,
-                city: mainAddressCity,
-                postalCode: mainAddressPostalCode,
-              },
-              registered: {
-                country: registeredAddressCountry,
-                state: registeredAddressState,
-                addressLine_1: registeredAddressLine1,
-                city: registeredAddressCity,
-              },
-            },
             phoneNumber,
           },
-          officers: officers.map((officer) => ({
-            role: officer.role,
-            fullName: {
-              firstName: officer.firstName,
-              lastName: officer.lastName,
-            },
-            nationality: officer.nationality,
-            address: {
-              country: officer.addressCountry,
-              state: officer.addressState,
-              addressLine_1: officer.addressLine1,
-              city: officer.addressCity,
-              postalCode: officer.addressPostalCode,
-            },
-            dateOfBirth: officer.dateOfBirth,
-            email: officer.email,
-            phoneNumber: officer.phoneNumber,
-            bvn: officer.bvn,
-            title: officer.title,
-            percentageOwned: officer.percentageOwned,
-          })),
+          status: acct.status || "ACTIVE",
+          accountId,
+          _safehaven: acct,
         },
-        type: "BusinessCustomer",
       },
     };
-
-    return makeApiRequest({ url, method: "POST", secretKey, body });
   },
 );
 
 // Verify Getanchor Business Customer
-exports.verifyBusinessCustomer = onCall(
-  { secrets: [getanchorSecretKey] },
+exports.safehavenVerifyBusinessCustomer = onCallLogged(
+  "safehavenVerifyBusinessCustomer",
+  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl] },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
-    const secretKey = getanchorSecretKey.value();
-    if (secretKey.length === 0) {
-      throw new HttpsError(
-        "invalid-argument",
-        "Getanchor Secret Key is not set",
-      );
-    }
-    console.log("sec key", secretKey);
     const requiredFields = [
       { key: "customerId", message: "Customer ID is required" },
     ];
-    console.log(data);
-
-    const validatedData = {};
-    requiredFields.forEach(({ key }) => {
-      validatedData[key] = data.data[key]?.trim();
-    });
     validateData(data.data, requiredFields);
+    const customerId = String(data.data.customerId || "").trim();
 
-    const { customerId } = validatedData;
+    const setupDoc = await db.collection("safehavenUserSetup").doc(customerId).get();
+    if (!setupDoc.exists) {
+      throw new HttpsError("not-found", "Business customer profile not found");
+    }
 
-    console.log("Sending request for customerId:", customerId);
+    const setup = setupDoc.data() || {};
+    const accountId = setup.safehavenAccountId;
+    let accountStatus = "PENDING";
+    let safehavenData = null;
 
-    const url = `${BASE_URL}/customers/${customerId}/verification/business`;
-    const body = null;
+    if (accountId) {
+      try {
+        const accountResp = await safehavenRequest({
+          path: `/accounts/${encodeURIComponent(accountId)}`,
+          method: "GET",
+        });
+        safehavenData = accountResp.data || null;
+        accountStatus = safehavenData?.status || "ACTIVE";
+      } catch (err) {
+        console.warn("[verifyBusinessCustomer] Safehaven lookup failed:", err.message);
+      }
+    }
 
-    return makeApiRequest({ url, method: "POST", secretKey, body });
+    return {
+      data: {
+        id: customerId,
+        type: "BusinessVerification",
+        attributes: {
+          status: accountStatus,
+          verified: accountStatus === "ACTIVE",
+          accountId: accountId || null,
+          _safehaven: safehavenData,
+        },
+      },
+    };
   },
 );
 
-// Upgrade Customer KYC
-exports.upgradeCustomerKyc = onCall(
-  { secrets: [getanchorSecretKey] },
+// Upgrade Customer KYC (Safe Haven ï¿½ stores BVN/identity data and calls /identity/v2/validate)
+exports.safehavenUpgradeCustomerKyc = onCallLogged(
+  "safehavenUpgradeCustomerKyc",
+  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl] },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
-    const secretKey = getanchorSecretKey.value();
-    if (!secretKey) {
-      throw new HttpsError(
-        "invalid-argument",
-        "Getanchor Secret Key is not set",
-      );
-    }
 
     validateData(data.data, [
       { key: "customerId", message: "Customer ID is required" },
       {
         key: "level",
         message: "Valid level (TIER_1, TIER_2 or TIER_3) is required",
-        validator: (v) => ["TIER_1","TIER_2", "TIER_3"].includes(v),
+        validator: (v) => ["TIER_1", "TIER_2", "TIER_3"].includes(v),
       },
     ]);
 
+    const uid = data.auth?.uid;
+    if (!uid) throw new HttpsError("unauthenticated", "User is not authenticated");
+
     const {
-      customerId,
       level,
       bvn,
       idNumber,
@@ -2049,154 +2274,530 @@ exports.upgradeCustomerKyc = onCall(
       expiryDate,
     } = data.data;
 
-    if (
-      level === "TIER_2" &&
-      (!bvn?.trim() || !dateOfBirth?.trim() || !gender?.trim())
-    ) {
-      throw new HttpsError(
-        "invalid-argument",
-        "BVN, dateOfBirth, and gender are required for TIER_2",
-      );
+    if (level === "TIER_2" && (!bvn?.trim() || !dateOfBirth?.trim() || !gender?.trim())) {
+      throw new HttpsError("invalid-argument", "BVN, dateOfBirth, and gender are required for TIER_2");
     }
-    if (
-      level === "TIER_3" &&
-      (!idNumber?.trim() || !idType?.trim() || !expiryDate)
-    ) {
-      throw new HttpsError(
-        "invalid-argument",
-        "ID number and ID type are required for TIER_3",
-      );
+    if (level === "TIER_3" && (!idNumber?.trim() || !idType?.trim())) {
+      throw new HttpsError("invalid-argument", "ID number and ID type are required for TIER_3");
     }
 
-    // Validate dateOfBirth format (YYYY-MM-DD)
-    if (level === "TIER_2" && dateOfBirth) {
-      const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-      if (!dateRegex.test(dateOfBirth)) {
-        throw new HttpsError(
-          "invalid-argument",
-          "dateOfBirth must be in YYYY-MM-DD format",
-        );
-      }
-      // Optional: Validate date is valid
-      const date = new Date(dateOfBirth);
-      if (isNaN(date.getTime())) {
-        throw new HttpsError("invalid-argument", "Invalid dateOfBirth");
-      }
-    }
-
-    // Validate gender
-    if (level === "TIER_2" && gender) {
-      const validGenders = ["Male", "Female", "Others"];
-      if (!validGenders.includes(gender)) {
-        throw new HttpsError(
-          "invalid-argument",
-          "Gender must be 'Male', 'Female', or 'Others'",
-        );
-      }
-    }
-
-    const levelData = { level };
-
+    // Store KYC data in Firestore for use during createElectronicAccount
+    const kycUpdate = { level, updatedAt: admin.firestore.FieldValue.serverTimestamp() };
     if (level === "TIER_2") {
-      levelData.level2 = {
-        bvn: bvn.trim(),
-        dateOfBirth: dateOfBirth.trim(),
-        gender: gender.trim(),
-      };
+      kycUpdate.bvn = bvn.trim();
+      kycUpdate.dateOfBirth = dateOfBirth.trim();
+      kycUpdate.gender = gender.trim();
     } else if (level === "TIER_3") {
-      levelData.level3 = {
-        idNumber: idNumber.trim(),
-        idType: idType.trim(),
-        expiryDate: expiryDate,
-      };
+      kycUpdate.idNumber = idNumber.trim();
+      kycUpdate.idType = idType.trim();
+      if (expiryDate) kycUpdate.idExpiryDate = expiryDate;
+    }
+    await db.collection("safehavenUserSetup").doc(uid).set(kycUpdate, { merge: true });
+
+    // Call Safehaven identity validation for TIER_2 (BVN) and TIER_3 (ID doc)
+    let safehavenResp = null;
+    try {
+      if (level === "TIER_2" && bvn?.trim()) {
+        safehavenResp = await safehavenRequest({
+          path: "/identity/v2/validate",
+          method: "POST",
+          body: {
+            type: "BVN",
+            number: bvn.trim(),
+            debitAccountNumber: "", // will be populated after account creation
+          },
+        });
+      } else if (level === "TIER_3" && idNumber?.trim()) {
+        safehavenResp = await safehavenRequest({
+          path: "/identity/v2/validate",
+          method: "POST",
+          body: {
+            type: idType?.trim() || "NIN",
+            number: idNumber.trim(),
+          },
+        });
+      }
+    } catch (err) {
+      // Identity validation errors are non-fatal here; we store the attempt
+      console.warn("[upgradeCustomerKyc] SafeHaven identity validate error:", err.message);
     }
 
-    const url = `${BASE_URL}/customers/${encodeURIComponent(
-      customerId.trim(),
-    )}/verification/individual`;
-
-    const body = {
+    // Return Anchor-compatible response
+    return {
       data: {
-        attributes: levelData,
+        id: uid,
         type: "Verification",
+        attributes: {
+          level,
+          status: safehavenResp?.data?.status || "PENDING",
+          _safehaven: safehavenResp?.data || null,
+        },
       },
     };
-
-    return makeApiRequest({ url, method: "POST", secretKey, body });
   },
 );
 
-// Create Electronic Account
-exports.createElectronicAccount = onCall(
-  { secrets: [getanchorSecretKey] },
+// Initiate identity verification to obtain identityId (_id)
+// Docs: POST /identity/v2
+exports.safehavenInitiateIdentityVerification = onCallLogged(
+  "safehavenInitiateIdentityVerification",
+  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl, safehavenDebitAccountNumber] },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
-    const secretKey = getanchorSecretKey.value();
-    if (secretKey.length === 0) {
+
+    validateData(data.data, [
+      {
+        key: "type",
+        message: "type is required (BVN or NIN)",
+        validator: (v) => ["BVN", "NIN", "BVNUSSD", "VNIN", "VID"].includes(String(v || "").toUpperCase()),
+      },
+      { key: "number", message: "number is required" },
+    ]);
+
+    const uid = data.auth?.uid;
+    if (!uid) throw new HttpsError("unauthenticated", "User is not authenticated");
+
+    const setupDoc = await db.collection("safehavenUserSetup").doc(uid).get();
+    const setup = setupDoc.exists ? setupDoc.data() : {};
+
+    const type = String(data.data.type || "").trim().toUpperCase();
+    const number = String(data.data.number || "").trim();
+    const configuredDebitAccount = await _getSafehavenDebitAccountConfig();
+    let debitAccountNumber = String(
+      data.data.debitAccountNumber ||
+        setup.safehavenAccountNumber ||
+        configuredDebitAccount.debitAccountNumber ||
+        "",
+    ).trim();
+    // Default to async:true â€” synchronous mode requires an immediate NIP debit
+    // which fails if the account has zero balance (sandbox always has 0).
+    // Async mode returns PENDING immediately; the result arrives via webhook.
+    const asyncMode = data.data.async !== false;
+
+    if (debitAccountNumber) {
+      console.log("[safehavenInitiateIdentityVerification] debit account source", {
+        mode: configuredDebitAccount.mode,
+        source: data.data.debitAccountNumber
+          ? "request"
+          : setup.safehavenAccountNumber
+          ? "safehavenUserSetup"
+          : configuredDebitAccount.source,
+        suffix: debitAccountNumber.slice(-4),
+      });
+    }
+
+    // Auto-resolve company main account number when not supplied or when the
+    // configured value is the sandbox-default fallback. GET /accounts?isSubAccount=false
+    // returns the main (non-sub) accounts for the client.
+    if (!debitAccountNumber || configuredDebitAccount.source === "sandbox-default") {
+      if (configuredDebitAccount.source === "sandbox-default" && debitAccountNumber) {
+        console.log(
+          "[safehavenInitiateIdentityVerification] configured debit account is sandbox-default; attempting /accounts auto-resolve to prefer a real company account",
+        );
+      }
+      try {
+        const accountsResp = await safehavenRequest({
+          path: "/accounts?isSubAccount=false&page=0&limit=1",
+          method: "GET",
+        });
+        const rootData = accountsResp?.data;
+        const candidateList = Array.isArray(rootData)
+          ? rootData
+          : Array.isArray(rootData?.data)
+            ? rootData.data
+            : Array.isArray(rootData?.accounts)
+              ? rootData.accounts
+              : Array.isArray(rootData?.result)
+                ? rootData.result
+                : [];
+
+        console.log("[safehavenInitiateIdentityVerification] /accounts response shape", {
+          rootIsArray: Array.isArray(rootData),
+          hasDataArray: Array.isArray(rootData?.data),
+          hasAccountsArray: Array.isArray(rootData?.accounts),
+          hasResultArray: Array.isArray(rootData?.result),
+          candidateCount: candidateList.length,
+        });
+
+        const firstAccount = candidateList[0] || rootData;
+        console.log("[safehavenInitiateIdentityVerification] /accounts first account keys", {
+          keys: firstAccount && typeof firstAccount === "object" ? Object.keys(firstAccount) : [],
+          hasAccountNumber: Boolean(firstAccount?.accountNumber),
+        });
+
+        const resolved = String(firstAccount?.accountNumber || "").trim();
+        if (resolved) {
+          debitAccountNumber = resolved;
+          console.log(`[safehavenInitiateIdentityVerification] Resolved company debitAccountNumber: ${debitAccountNumber}`);
+        }
+      } catch (fetchErr) {
+        console.warn("[safehavenInitiateIdentityVerification] Could not auto-resolve company account:", fetchErr.message);
+      }
+    }
+
+    if (!debitAccountNumber) {
       throw new HttpsError(
         "invalid-argument",
-        "Getanchor Secret Key is not set",
+        "debitAccountNumber is required to initiate identity verification",
       );
     }
 
+    const resp = await safehavenRequest({
+      path: "/identity/v2",
+      method: "POST",
+      body: {
+        type,
+        number,
+        debitAccountNumber,
+        async: asyncMode,
+      },
+    });
+
+    const verification = resp.data || {};
+    const identityId = String(
+      verification._id || verification.id || verification.identityId || "",
+    ).trim();
+
+    await db.collection("safehavenUserSetup").doc(uid).set(
+      {
+        identityVerification: {
+          identityId: identityId || null,
+          type,
+          number,
+          status: verification.status || "PENDING",
+          initiatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          rawInitiate: verification,
+        },
+        identityId: identityId || null,
+        identityType: identityId ? "vID" : setup.identityType || null,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+
+    return {
+      data: {
+        identityId: identityId || null,
+        type,
+        status: verification.status || "PENDING",
+        _safehaven: verification,
+      },
+    };
+  },
+);
+
+// Validate identity verification with OTP
+// Docs: POST /identity/v2/validate
+exports.safehavenValidateIdentityVerification = onCallLogged(
+  "safehavenValidateIdentityVerification",
+  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl] },
+  async (data, context) => {
+    await ensureVerifiedOrStandUser(data.auth);
+
     validateData(data.data, [
-      { key: "customerId", message: "Customer ID is required" },
-      { key: "currency", message: "Currency is required" },
-      { key: "type", message: "Type is required" },
+      { key: "identityId", message: "identityId is required" },
+      {
+        key: "type",
+        message: "type is required (BVN or NIN)",
+        validator: (v) => ["BVN", "NIN", "BVNUSSD", "VNIN", "VID"].includes(String(v || "").toUpperCase()),
+      },
+      { key: "otp", message: "otp is required" },
+    ]);
+
+    const uid = data.auth?.uid;
+    if (!uid) throw new HttpsError("unauthenticated", "User is not authenticated");
+
+    const identityId = String(data.data.identityId || "").trim();
+    const type = String(data.data.type || "").trim().toUpperCase();
+    const otp = String(data.data.otp || "").trim();
+
+    const resp = await safehavenRequest({
+      path: "/identity/v2/validate",
+      method: "POST",
+      body: {
+        identityId,
+        type,
+        otp,
+      },
+    });
+
+    const verification = resp.data || {};
+    const resolvedIdentityId = String(
+      verification._id || verification.identityId || identityId,
+    ).trim();
+
+    await db.collection("safehavenUserSetup").doc(uid).set(
+      {
+        identityVerification: {
+          identityId: resolvedIdentityId,
+          type,
+          status: verification.status || "VALIDATED",
+          validatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          rawValidate: verification,
+        },
+        identityId: resolvedIdentityId,
+        identityType: "vID",
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+
+    return {
+      data: {
+        identityId: resolvedIdentityId,
+        identityType: "vID",
+        status: verification.status || "VALIDATED",
+        _safehaven: verification,
+      },
+    };
+  },
+);
+
+// Create Sub Account
+// Creates a Safehaven sub-account under the company account.
+exports.safehavenCreateSubAccount = onCallLogged(
+  "safehavenCreateSubAccount",
+  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl, safehavenDebitAccountNumber] },
+  async (data, context) => {
+    await ensureVerifiedOrStandUser(data.auth);
+
+    validateData(data.data, [
       { key: "idempotencyKey", message: "Idempotency key is required" },
     ]);
 
-    const customerId = data.data.customerId.trim();
-    const currency = data.data.currency.trim();
-    const type = data.data.type.trim();
+    const uid = data.auth?.uid;
+    if (!uid) throw new HttpsError("unauthenticated", "User is not authenticated");
+
     const idempotencyKey = data.data.idempotencyKey.trim();
 
-    const url = `${BASE_URL}/accounts`;
-    const body = {
-      data: {
-        attributes: {
-          productName: type == "IndividualCustomer" ? "SAVINGS" : "CURRENT",
-        },
-        relationships: {
-          customer: { data: { id: customerId, type: type } },
-        },
-        type: "DepositAccount",
-      },
+    const setupPatch = {
+      firstName: String(data.data.firstName || "").trim(),
+      lastName: String(data.data.lastName || "").trim(),
+      email: String(data.data.email || "").trim(),
+      phoneNumber: String(data.data.phoneNumber || "").trim(),
+      country: String(data.data.country || "NG").trim() || "NG",
+      state: String(data.data.state || "").trim(),
+      addressLine1: String(data.data.addressLine1 || "").trim(),
+      city: String(data.data.city || "").trim(),
+      postalCode: String(data.data.postalCode || "").trim(),
+      bvn: String(data.data.bvn || "").trim(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     };
 
-    return makeApiRequest({
-      url,
-      method: "POST",
-      secretKey,
-      body,
-      idempotencyKey,
-    });
+    await db.collection("safehavenUserSetup").doc(uid).set(setupPatch, { merge: true });
+
+    // Read user info stored for subaccount creation.
+    const setupDoc = await db.collection("safehavenUserSetup").doc(uid).get();
+    const setup = setupDoc.exists ? setupDoc.data() : {};
+
+    const requestedIdentityId = String(data.data.identityId || "").trim();
+    const setupIdentityId = String(
+      setup.identityId || setup.identityVerification?.identityId || "",
+    ).trim();
+    // If the webhook already marked this identityId as FAILED, discard it so
+    // we fall through to the BVN fallback path without a wasted 500 round-trip.
+    const storedIdentityStatus = String(setup.identityCheckStatus || "").trim().toUpperCase();
+    const rawResolvedId = requestedIdentityId || setupIdentityId;
+    const resolvedIdentityId = (storedIdentityStatus === "FAILED" && !requestedIdentityId)
+      ? ""
+      : rawResolvedId;
+
+    const requestedIdentityType = String(data.data.identityType || "").trim();
+    const resolvedIdentityType = requestedIdentityType || (resolvedIdentityId ? "vID" : "BVN");
+
+    const externalReference = String(data.data.externalReference || idempotencyKey).trim() || idempotencyKey;
+    const companyRegistrationNumber = String(data.data.companyRegistrationNumber || "").trim();
+    const autoSweep = Boolean(data.data.autoSweep);
+    const autoSweepDetails =
+      data.data.autoSweepDetails && typeof data.data.autoSweepDetails === "object"
+        ? data.data.autoSweepDetails
+        : null;
+
+    const subAccountBody = {
+      phoneNumber: setup.phoneNumber || "",
+      emailAddress: setup.email || "",
+      identityType: resolvedIdentityType,
+      externalReference,
+      autoSweep,
+    };
+
+    if (!subAccountBody.phoneNumber) {
+      throw new HttpsError("invalid-argument", "phoneNumber is required to create subaccount");
+    }
+
+    if (!subAccountBody.emailAddress) {
+      throw new HttpsError("invalid-argument", "email is required to create subaccount");
+    }
+
+    if (companyRegistrationNumber) {
+      subAccountBody.companyRegistrationNumber = companyRegistrationNumber;
+    }
+
+    if (autoSweep && autoSweepDetails) {
+      subAccountBody.autoSweepDetails = autoSweepDetails;
+    }
+
+    // Build identity section. We always prefer vID (identityId) first, then
+    // fall back to BVN direct if identityId is absent or its credit-check failed.
+    const bvnForFallback = String(setup.bvn || data.data.bvn || "").trim();
+
+    if (resolvedIdentityId) {
+      subAccountBody.identityId = resolvedIdentityId;
+    } else if (bvnForFallback) {
+      // No identityId yet â€” use BVN mode directly (no identityId field).
+      subAccountBody.identityType = "BVN";
+      subAccountBody.identityNumber = bvnForFallback;
+    } else {
+      throw new HttpsError(
+        "failed-precondition",
+        "Missing identityId or BVN. Call safehavenInitiateIdentityVerification then safehavenValidateIdentityVerification before creating subaccount.",
+      );
+    }
+
+    let resp;
+    try {
+      resp = await safehavenRequest({
+        path: "/accounts/subaccount",
+        method: "POST",
+        body: subAccountBody,
+      });
+    } catch (err) {
+      // If the vID mode failed (e.g. identity credit-check FAILED in sandbox /
+      // production), fall back to BVN mode which does not require the debit.
+      const isVidMode = subAccountBody.identityType === "vID";
+      const is500 = String(err?.message || "").includes("500");
+      if (isVidMode && bvnForFallback && (is500 || err?.code === "internal")) {
+        console.warn(
+          `[safehavenCreateSubAccount] vID mode failed (${err.message}); retrying with BVN fallback`,
+        );
+        // BVN mode requires an identityId obtained from POST /identity/v2 first.
+        const debitAccountConfig = await _getSafehavenDebitAccountConfig();
+        const debitAccountNumber = debitAccountConfig.debitAccountNumber || "0104610514";
+        console.log("[safehavenCreateSubAccount] Initiating BVN identity check", { debitSource: debitAccountConfig.source });
+        const identityInitResp = await safehavenRequest({
+          path: "/identity/v2",
+          method: "POST",
+          body: { type: "BVN", number: bvnForFallback, debitAccountNumber, async: false },
+        });
+        const bvnIdentityId =
+          identityInitResp?._id ||
+          identityInitResp?.data?._id ||
+          identityInitResp?.data?.id ||
+          identityInitResp?.id;
+        const bvnIdentityStatus = String(
+          identityInitResp?.data?.status || identityInitResp?.status || ""
+        ).trim().toUpperCase();
+        if (!bvnIdentityId) {
+          throw new HttpsError("internal", "BVN identity check failed: no identityId returned from /identity/v2");
+        }
+        if (bvnIdentityStatus && bvnIdentityStatus !== "SUCCESS") {
+          throw new HttpsError(
+            "failed-precondition",
+            `BVN identity check status: ${bvnIdentityStatus}. Debit may have failed â€” check debitAccountNumber.`,
+          );
+        }
+        console.log("[safehavenCreateSubAccount] BVN identity check OK", { bvnIdentityId, bvnIdentityStatus });
+        const bvnBody = {
+          ...subAccountBody,
+          identityType: "BVN",
+          identityId: bvnIdentityId,
+        };
+        delete bvnBody.identityNumber;
+        console.log("[safehavenCreateSubAccount] Retrying subaccount creation with BVN fallback", { bvnBody });
+        resp = await safehavenRequest({
+          path: "/accounts/subaccount",
+          method: "POST",
+          body: bvnBody,
+        });
+      } else {
+        throw err;
+      }
+    }
+
+    const acct = resp.data || {};
+    console.log("[safehavenCreateSubAccount] subaccount creation response", { resp: acct });
+    const accountId = acct._id || acct.id || uid;
+    const accountNumber = acct.accountNumber || "";
+    const bankCode = acct.bankCode || "090286";
+    const bankName = acct.bankName || "Safe Haven MFB";
+    const accountName = acct.accountName || "";
+
+    // Persist mapping for later lookups
+    await db.collection("safehavenUserSetup").doc(uid).set({
+      safehavenAccountId: accountId,
+      safehavenAccountNumber: accountNumber,
+      safehavenBankCode: bankCode,
+      safehavenBankName: bankName,
+      safehavenAccountName: accountName,
+      identityId: resolvedIdentityId || null,
+      identityType: subAccountBody.identityType,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    // Return Anchor-compatible shape that Flutter stores under getAnchorData.virtualAccount
+    return {
+      data: {
+        id: accountId,
+        type: "DepositAccount",
+        attributes: {
+          accountNumber,
+          accountName,
+          currency: "NGN",
+          bank: { id: bankCode, name: bankName },
+          status: acct.status || "ACTIVE",
+        },
+      },
+    };
   },
 );
 
-// Fetch Account Balance
-exports.fetchAccountBalance = onCall(
-  { secrets: [getanchorSecretKey] },
+// Fetch Account Balance (Safehaven ï¿½ returns balance in kobo to match Anchor contract)
+exports.safehavenFetchAccountBalance = onCall(
+  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl] },
   async (data, context) => {
     console.log("fetchAccountBalance called with data:", data);
     await ensureVerifiedOrStandUser(data.auth);
-    const secretKey = getanchorSecretKey.value();
-    if (secretKey.length === 0) {
-      throw new HttpsError(
-        "invalid-argument",
-        "Getanchor Secret Key is not set",
-      );
-    }
 
     validateData(data.data, [
       { key: "accountId", message: "Account ID is required" },
     ]);
 
-    const accountId = data.data.accountId.trim();
-    
-    const url = `${BASE_URL}/accounts/balance/${encodeURIComponent(accountId)}`;
+    let accountId = data.data.accountId.trim();
+    // SafeHaven MongoDB _ids are 24 chars. If accountId > 24 chars it's a Firebase
+    // UID stored as fallback when the subaccount API didn't return _id. Look up
+    // the real SafeHaven accountId from safehavenUserSetup.
+    if (accountId.length > 24) {
+      const callerUid = data.auth?.uid;
+      if (callerUid) {
+        const setupSnap = await db.collection("safehavenUserSetup").doc(callerUid).get();
+        const realId = setupSnap.data()?.safehavenAccountId;
+        if (realId && realId.length <= 24) {
+          console.log(`[safehavenFetchAccountBalance] Resolved Firebase UID to SafeHaven accountId: ${realId}`);
+          accountId = realId;
+        } else {
+          throw new HttpsError("not-found", "SafeHaven account ID not found. Please contact support.");
+        }
+      }
+    }
 
-    return makeApiRequest({ url, method: "GET", secretKey });
+    const resp = await safehavenRequest({
+      path: `/accounts/${encodeURIComponent(accountId)}`,
+      method: "GET",
+    });
+
+    const acct = resp.data || {};
+    // Safehaven returns balance in naira; Flutter divides by 100 expecting kobo
+    const balanceKobo = Math.round((acct.accountBalance ?? 0) * 100);
+    const ledgerKobo = Math.round((acct.ledgerBalance ?? acct.accountBalance ?? 0) * 100);
+
+    return {
+      data: {
+        availableBalance: balanceKobo,
+        ledgerBalance: ledgerKobo,
+        accountNumber: acct.accountNumber || "",
+        currency: acct.currency || "NGN",
+      },
+    };
   },
 );
 
@@ -2260,7 +2861,7 @@ exports.fetchAccountBalanceHttp = onRequest(
 );
 
 // Fetch Account Details
-exports.fetchAccountDetails = onCall(
+exports.safehavenFetchAccountDetails = onCall(
   { secrets: [getanchorSecretKey] },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
@@ -2285,50 +2886,60 @@ exports.fetchAccountDetails = onCall(
 );
 
 // Fetch Account Number
-exports.fetchAccountNumber = onCall(
-  { secrets: [getanchorSecretKey] },
+exports.safehavenFetchAccountNumber = onCall(
+  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl] },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
-    const secretKey = getanchorSecretKey.value();
-    if (!secretKey || secretKey.length === 0) {
-      throw new HttpsError(
-        "invalid-argument",
-        "Getanchor Secret Key is not set",
-      );
-    }
 
     validateData(data.data, [
       { key: "accountId", message: "Account ID is required" },
     ]);
 
-    const accountId = data.data.accountId.trim();
-    
-    const url = `${BASE_URL}/account-numbers?AccountId=${encodeURIComponent(accountId)}`;
-
-    const response = await makeApiRequest({ url, method: "GET", secretKey });
-
-    const list = response.data;
-    if (!Array.isArray(list) || list.length === 0) {
-      throw new HttpsError("not-found", "Account number not found");
+    let accountId = data.data.accountId.trim();
+    // If accountId > 24 chars it's a Firebase UID stored as fallback. Look up
+    // the real SafeHaven accountId from safehavenUserSetup.
+    if (accountId.length > 24) {
+      const callerUid = data.auth?.uid;
+      if (callerUid) {
+        const setupSnap = await db.collection("safehavenUserSetup").doc(callerUid).get();
+        const realId = setupSnap.data()?.safehavenAccountId;
+        if (realId && realId.length <= 24) {
+          console.log(`[safehavenFetchAccountNumber] Resolved Firebase UID to SafeHaven accountId: ${realId}`);
+          accountId = realId;
+        } else {
+          throw new HttpsError("not-found", "SafeHaven account ID not found. Please contact support.");
+        }
+      }
     }
 
-    const item =
-      list.find((i) => i.attributes && i.attributes.isDefault === true) ||
-      list[0];
+    // SafeHaven assigns account numbers asynchronously after subaccount creation.
+    // Retry up to 4 times with 3-second gaps if accountNumber is still empty.
+    let acct = {};
+    const maxAttempts = 4;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const resp = await safehavenRequest({
+        path: `/accounts/${encodeURIComponent(accountId)}`,
+        method: "GET",
+      });
+      acct = resp.data || {};
+      if (acct.accountNumber) break;
+      if (attempt < maxAttempts) {
+        console.log(`[safehavenFetchAccountNumber] accountNumber empty on attempt ${attempt}; retrying in 3s...`);
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+    }
 
-    // Extract account number and bank name (if available)
-    const accountNumber = item?.attributes?.accountNumber ?? null;
-    const bankName = item?.attributes?.bank?.name ?? null;
+    const accountNumber = acct.accountNumber || null;
 
     if (!accountNumber) {
-      throw new HttpsError(
-        "internal",
-        "Account number not present in response",
-      );
+      throw new HttpsError("not-found", "Account number not yet assigned by SafeHaven");
     }
 
-    // Return only account number and bank name (as `bank`)
-    return { accountNumber, bank: bankName };
+    // Bank is always Safe Haven MFB for subaccounts; include name + code if available
+    const bankName = acct.bankName || "Safe Haven MFB";
+    const bankCode = acct.bankCode || "090286";
+
+    return { accountNumber, bank: { name: bankName, id: bankCode } };
   },
 );
 
@@ -2421,7 +3032,7 @@ const sendEmailNotificationByAccountId = async (accountId, { title, body }) => {
 };
 
 // Freeze Account
-exports.freezeAccount = onCall(
+exports.sudoFreezeAccount = onCall(
   { secrets: [getanchorSecretKey] },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
@@ -2484,7 +3095,7 @@ exports.freezeAccount = onCall(
 );
 
 // Unfreeze Account
-exports.unFreezeAccount = onCall(
+exports.sudoUnFreezeAccount = onCall(
   { secrets: [getanchorSecretKey] },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
@@ -2534,129 +3145,141 @@ exports.unFreezeAccount = onCall(
   },
 );
 
-// Create Counterparty
-exports.createCounterparty = onCall(
-  { secrets: [getanchorSecretKey] },
+// Create Counterparty (Safehaven shim â€” stores beneficiary in Firestore)
+exports.safehavenCreateCounterparty = onCall(
+  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl] },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
-    const secretKey = getanchorSecretKey.value();
-    if (secretKey.length === 0) {
-      throw new HttpsError(
-        "invalid-argument",
-        "Getanchor Secret Key is not set",
-      );
-    }
 
     validateData(data.data, [
       { key: "accountName", message: "Account name is required" },
-      { key: "accountType", message: "Account type is required" },
-      { key: "bankName", message: "Bank name is required" },
       { key: "accountNumber", message: "Account number is required" },
       { key: "bankId", message: "Bank id is required" },
     ]);
 
-    const accountName = data.data.accountName.trim();
-    const bankName = data.data.bankName.trim();
-    const accountNumber = data.data.accountNumber.trim();
-    const bankId = data.data.bankId.trim();
-    const accountType = data.data.accountType.trim();
+    const uid = data.auth?.uid;
+    if (!uid) throw new HttpsError("unauthenticated", "User is not authenticated");
 
-    
-    const url = `${BASE_URL}/counterparties`;
-    const body = {
+    const accountName = data.data.accountName.trim();
+    const bankName = data.data.bankName?.trim() || "";
+    const accountNumber = data.data.accountNumber.trim();
+    const bankCode = data.data.bankId.trim();
+    const generatedId = `${bankCode}_${accountNumber}`;
+
+    await db
+      .collection("safehavenCounterparties")
+      .doc(uid)
+      .collection("beneficiaries")
+      .doc(generatedId)
+      .set({
+        accountName,
+        accountNumber,
+        bankCode,
+        bankName,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+
+    return {
       data: {
+        id: generatedId,
+        type: "CounterParty",
         attributes: {
           accountName,
           accountNumber,
-          bank: { name: bankName, accountNumber },
+          bank: { id: bankCode, name: bankName },
         },
-        relationships: {
-          bank: { data: { id: bankId, type: accountType } },
-        },
-        type: "CounterParty",
       },
     };
-
-    return makeApiRequest({ url, method: "POST", secretKey, body });
   },
 );
 
 // Create NIP Transfer
-exports.createNipTransfer = onCall(
-  { secrets: [getanchorSecretKey] },
+exports.safehavenTransferNip = onCallLogged(
+  "safehavenTransferNip",
+  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl] },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
-    const secretKey = getanchorSecretKey.value();
-    if (secretKey.length === 0) {
-      throw new HttpsError(
-        "invalid-argument",
-        "Getanchor Secret Key is not set",
-      );
-    }
 
     validateData(data.data, [
       { key: "accountId", message: "Account ID is required" },
-      { key: "accountType", message: "Account Type is required" },
       { key: "counterpartyId", message: "Counterparty ID is required" },
       {
         key: "amount",
         message: "Valid amount is required",
         validator: (v) => typeof v === "number" && v > 0,
       },
-      { key: "currency", message: "Currency is required" },
       { key: "idempotencyKey", message: "Idempotency key is required" },
     ]);
 
-    const accountId = data.data.accountId.trim();
-    const accountType = data.data.accountType.trim();
+    const uid = data.auth?.uid;
+    if (!uid) throw new HttpsError("unauthenticated", "User is not authenticated");
+
     const counterpartyId = data.data.counterpartyId.trim();
-    const amount = data.data.amount;
-    const currency = data.data.currency.trim();
-    const narration = data.data.narration?.trim() || "";
+    const amount = data.data.amount; // kobo
+    const narration = data.data.narration?.trim() || "Transfer";
     const idempotencyKey = data.data.idempotencyKey.trim();
 
-    
-    const url = `${BASE_URL}/transfers`;
-    const attributes = {
-      amount,
-      currency,
-    };
-    if (narration) {
-      attributes.narration = narration;
+    const cpDoc = await db
+      .collection("safehavenCounterparties")
+      .doc(uid)
+      .collection("beneficiaries")
+      .doc(counterpartyId)
+      .get();
+    if (!cpDoc.exists) {
+      throw new HttpsError("not-found", "Counterparty not found");
     }
-    const body = {
+    const cp = cpDoc.data();
+
+    const acctInfo = await _getSafehavenAccountForUser(uid);
+    const debitAccountNumber = acctInfo.accountNumber;
+    if (!debitAccountNumber) {
+      throw new HttpsError("failed-precondition", "Virtual account not set up");
+    }
+
+    const enquiry = await _safehavenNameEnquiry(uid, cp.bankCode, cp.accountNumber);
+    const nameEnquiryReference = enquiry.nameEnquiryReference;
+    if (!nameEnquiryReference) {
+      throw new HttpsError("failed-precondition", "Name enquiry failed");
+    }
+
+    const resp = await safehavenRequest({
+      path: "/transfers",
+      method: "POST",
+      body: {
+        nameEnquiryReference,
+        debitAccountNumber,
+        beneficiaryBankCode: cp.bankCode,
+        beneficiaryAccountNumber: cp.accountNumber,
+        narration,
+        amount: amount / 100,
+        saveBeneficiary: false,
+        paymentReference: idempotencyKey,
+      },
+    });
+    const tx = resp.data || {};
+
+    return {
       data: {
-        attributes,
-        relationships: {
-          account: { data: { id: accountId, type: accountType } },
-          counterParty: { data: { id: counterpartyId, type: "CounterParty" } },
-        },
+        id: tx._id || tx.id || idempotencyKey,
         type: "NIPTransfer",
+        attributes: {
+          amount,
+          currency: "NGN",
+          status: tx.status || "PENDING",
+          narration,
+          reference: tx.paymentReference || idempotencyKey,
+        },
       },
     };
-
-    return makeApiRequest({
-      url,
-      method: "POST",
-      secretKey,
-      body,
-      idempotencyKey,
-    });
   },
 );
 
 // Create Book Transfer
-exports.createBookTransfer = onCall(
-  { secrets: [getanchorSecretKey] },
+exports.safehavenTransferIntra = onCallLogged(
+  "safehavenTransferIntra",
+  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl] },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
-    const secretKey = getanchorSecretKey.value();
-    if (secretKey.length === 0) {
-      throw new HttpsError(
-        "invalid-argument",
-        "Getanchor Secret Key is not set",
-      );
-    }
 
     validateData(data.data, [
       { key: "fromAccountId", message: "From Account ID is required" },
@@ -2666,58 +3289,78 @@ exports.createBookTransfer = onCall(
         message: "Valid amount is required",
         validator: (v) => typeof v === "number" && v > 0,
       },
-      { key: "currency", message: "Currency is required" },
       { key: "narration", message: "Narration is required" },
       { key: "idempotencyKey", message: "Idempotency key is required" },
     ]);
 
+    const uid = data.auth?.uid;
+    if (!uid) throw new HttpsError("unauthenticated", "User is not authenticated");
+
     const fromAccountId = data.data.fromAccountId.trim();
     const toAccountId = data.data.toAccountId.trim();
-    const amount = data.data.amount;
-    const currency = data.data.currency.trim();
+    const amount = data.data.amount; // kobo
     const narration = data.data.narration.trim();
     const idempotencyKey = data.data.idempotencyKey.trim();
 
-    
-    const url = `${BASE_URL}/transfers`;
-    const body = {
+    const fromSnap = await db
+      .collection("safehavenUserSetup")
+      .where("safehavenAccountId", "==", fromAccountId)
+      .limit(1)
+      .get();
+    const toSnap = await db
+      .collection("safehavenUserSetup")
+      .where("safehavenAccountId", "==", toAccountId)
+      .limit(1)
+      .get();
+
+    const fromAcct = fromSnap.empty ? null : fromSnap.docs[0].data();
+    const toAcct = toSnap.empty ? null : toSnap.docs[0].data();
+
+    const fromAccountNumber = fromAcct?.safehavenAccountNumber || fromAccountId;
+    const toAccountNumber = toAcct?.safehavenAccountNumber || toAccountId;
+    const bankCode = fromAcct?.safehavenBankCode || "090286";
+    const fromUid = fromSnap.empty ? uid : fromSnap.docs[0].id;
+
+    const enquiry = await _safehavenNameEnquiry(fromUid, bankCode, toAccountNumber);
+    const nameEnquiryReference = enquiry.nameEnquiryReference;
+    if (!nameEnquiryReference) {
+      throw new HttpsError("failed-precondition", "Name enquiry failed for destination account");
+    }
+
+    const resp = await safehavenRequest({
+      path: "/transfers",
+      method: "POST",
+      body: {
+        nameEnquiryReference,
+        debitAccountNumber: fromAccountNumber,
+        beneficiaryBankCode: bankCode,
+        beneficiaryAccountNumber: toAccountNumber,
+        narration,
+        amount: amount / 100,
+        saveBeneficiary: false,
+        paymentReference: idempotencyKey,
+      },
+    });
+    const tx = resp.data || {};
+
+    return {
       data: {
+        id: tx._id || tx.id || idempotencyKey,
         type: "BookTransfer",
         attributes: {
-          currency,
           amount,
-          reason: narration,
-          reference: idempotencyKey,
-        },
-        relationships: {
-          destinationAccount: {
-            data: {
-              type: "DepositAccount",
-              id: toAccountId,
-            },
-          },
-          account: {
-            data: {
-              type: "DepositAccount",
-              id: fromAccountId,
-            },
-          },
+          currency: "NGN",
+          status: tx.status || "PENDING",
+          narration,
+          reference: tx.paymentReference || idempotencyKey,
         },
       },
     };
-
-    return makeApiRequest({
-      url,
-      method: "POST",
-      secretKey,
-      body,
-      idempotencyKey,
-    });
   },
 );
 
 // Verify Transfer
-exports.verifyTransfer = onCall(
+exports.sudoVerifyTransfer = onCall(
   { secrets: [getanchorSecretKey] },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
@@ -2744,157 +3387,241 @@ exports.verifyTransfer = onCall(
 );
 
 // Verify Transfer by Reference (idempotency key used as reference in book transfer)
-exports.verifyTransferByReference = onCall(
-  { secrets: [getanchorSecretKey] },
+exports.safehavenVerifyTransferByReference = onCallLogged(
+  "safehavenVerifyTransferByReference",
+  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl] },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
-    const secretKey = getanchorSecretKey.value();
-    if (secretKey.length === 0) {
-      throw new HttpsError(
-        "invalid-argument",
-        "Getanchor Secret Key is not set",
-      );
-    }
-
     validateData(data.data, [
       { key: "reference", message: "Transfer reference is required" },
     ]);
 
     const reference = data.data.reference.trim();
-    const url = `${BASE_URL}/transfers/by-reference/${encodeURIComponent(reference)}`;
 
-    return makeApiRequest({ url, method: "GET", secretKey });
+    const resp = await safehavenRequest({
+      path: `/transfers?page=0&limit=50&paymentReference=${encodeURIComponent(reference)}`,
+      method: "GET",
+    });
+
+    const transfers = Array.isArray(resp.data) ? resp.data : [];
+    const matched =
+      transfers.find((item) => item.paymentReference === reference) ||
+      transfers.find((item) => item.reference === reference) ||
+      null;
+
+    if (!matched) {
+      throw new HttpsError("not-found", "Transfer not found");
+    }
+
+    return {
+      data: {
+        id: matched._id || matched.id || reference,
+        type: "Transfer",
+        attributes: {
+          amount: Math.round((matched.amount || 0) * 100),
+          status: matched.status || "PENDING",
+          reference: matched.paymentReference || reference,
+          narration: matched.narration || "",
+          createdAt: matched.createdAt || null,
+        },
+        _safehaven: matched,
+      },
+    };
   },
 );
 
 // Get All Banks
-exports.getAllBanks = onCall(
-  { secrets: [getanchorSecretKey] },
+// Get All Banks (Safehaven ï¿½ transforms to Anchor-compatible bank list shape)
+exports.safehavenBankList = onCallLogged(
+  "safehavenBankList",
+  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl] },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
-    const secretKey = getanchorSecretKey.value();
-    if (secretKey.length === 0) {
-      throw new HttpsError(
-        "invalid-argument",
-        "Getanchor Secret Key is not set",
-      );
-    }
 
-    
-    const url = `${BASE_URL}/banks`;
+    const resp = await safehavenRequest({
+      path: "/transfers/banks?showLogos=true",
+      method: "GET",
+    });
 
-    return makeApiRequest({ url, method: "GET", secretKey });
+    const banks = Array.isArray(resp.data) ? resp.data : [];
+
+    // Transform to Anchor shape: [{id, attributes:{name}}]
+    return {
+      data: banks.map((b) => ({
+        id: b.bankCode || b._id || b.id,
+        type: "Bank",
+        attributes: { name: b.name || b.bankName || "" },
+        _safehaven: { bankCode: b.bankCode, routingKey: b.routingKey },
+      })),
+    };
   },
 );
 
-// Verify Account Number
-exports.verifyAccountNumber = onCall(
-  { secrets: [getanchorSecretKey] },
+// Verify Account Number (Safehaven name-enquiry ï¿½ Anchor-compatible response)
+exports.safehavenNameEnquiry = onCallLogged(
+  "safehavenNameEnquiry",
+  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl] },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
-    const secretKey = getanchorSecretKey.value();
-    if (secretKey.length === 0) {
-      throw new HttpsError(
-        "invalid-argument",
-        "Getanchor Secret Key is not set",
-      );
-    }
 
     validateData(data.data, [
       { key: "accountNumber", message: "Account number is required" },
-      { key: "bankIdOrBankCode", message: "Bank ID or bank code is required" },
     ]);
 
+    const uid = data.auth?.uid;
     const accountNumber = data.data.accountNumber.trim();
-    const bankIdOrBankCode = data.data.bankIdOrBankCode.trim();
-    
-    const url = `${BASE_URL}/payments/verify-account/${encodeURIComponent(
-      bankIdOrBankCode,
-    )}/${encodeURIComponent(accountNumber)}`;
+    const bankCodeRaw = data.data.bankIdOrBankCode ?? data.data.bankCode;
+    const bankCode = String(bankCodeRaw || "").trim();
+    if (!bankCode) {
+      throw new HttpsError("invalid-argument", "Bank ID or bank code is required");
+    }
 
-    return makeApiRequest({ url, method: "GET", secretKey });
+    const enquiry = await _safehavenNameEnquiry(uid, bankCode, accountNumber);
+
+    // Return Anchor-compatible shape Flutter reads: data.attributes.accountName
+    return {
+      data: {
+        type: "AccountVerification",
+        attributes: {
+          accountName: enquiry.accountName || "",
+          accountNumber,
+          bankCode,
+        },
+        _safehaven: {
+          nameEnquiryReference: enquiry.nameEnquiryReference || "",
+          sessionId: enquiry.sessionId || "",
+        },
+      },
+    };
   },
 );
 
 // List Billers
 
 // List Biller Products
-exports.listBillerProducts = onCall(
-  { secrets: [getanchorSecretKey] },
+exports.safehavenListBillerProducts = onCall(
+  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl] },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
-    const secretKey = getanchorSecretKey.value();
-    if (secretKey.length === 0) {
-      throw new HttpsError(
-        "invalid-argument",
-        "Getanchor Secret Key is not set",
-      );
-    }
-
     validateData(data.data, [
       { key: "billerId", message: "Biller ID is required" },
     ]);
 
-    const billerId = data.data.billerId.trim();
-    
-    const url = `${BASE_URL}/bills/billers/${encodeURIComponent(
-      billerId,
-    )}/products`;
+    const serviceCategoryId = data.data.billerId.trim();
 
-    return makeApiRequest({ url, method: "GET", secretKey });
+    const resp = await safehavenRequest({
+      path: `/vas/service-category/${encodeURIComponent(serviceCategoryId)}/products`,
+      method: "GET",
+    });
+
+    const products = Array.isArray(resp.data) ? resp.data : [];
+    return {
+      data: products.map((p) => {
+        const amountKobo = p.amount == null ? 0 : Math.round(Number(p.amount) * 100);
+        return {
+          id: p.bundleCode || p.slug || p.name,
+          type: "BillerProduct",
+          attributes: {
+            name: p.name || "",
+            slug: p.bundleCode || p.slug || p.name,
+            code: p.bundleCode || p.slug || p.name,
+            price: {
+              minimumAmount: amountKobo,
+              maximumAmount: p.isAmountFixed ? amountKobo : null,
+            },
+            isAmountFixed: Boolean(p.isAmountFixed),
+            duration: p.duration || null,
+          },
+          _safehaven: p,
+        };
+      }),
+    };
   },
 );
 
-exports.fetchDepositAccount = onCall(
-  { secrets: [getanchorSecretKey] },
+exports.safehavenFetchDepositAccount = onCall(
+  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl] },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
-    const secretKey = getanchorSecretKey.value();
-    if (secretKey.length === 0) {
-      throw new HttpsError(
-        "invalid-argument",
-        "Getanchor Secret Key is not set",
-      );
-    }
 
     const { accountId } = data.data;
     if (!accountId) {
       throw new HttpsError("invalid-argument", "Account ID is required");
     }
 
-    
-    const url = `${BASE_URL}/accounts/${accountId}`;
+    const resp = await safehavenRequest({
+      path: `/accounts/${encodeURIComponent(accountId.trim())}`,
+      method: "GET",
+    });
+    const acct = resp.data || {};
 
-    return makeApiRequest({ url, method: "GET", secretKey });
+    return {
+      data: {
+        id: acct._id || acct.id || accountId,
+        type: "DepositAccount",
+        attributes: {
+          accountNumber: acct.accountNumber || "",
+          currency: acct.currency || "NGN",
+          availableBalance: Math.round((acct.accountBalance ?? 0) * 100),
+          bank: {
+            id: acct.bankCode || "090286",
+            name: acct.bankName || "Safe Haven MFB",
+          },
+          status: acct.status || "ACTIVE",
+        },
+      },
+    };
   },
 );
 
 // List Transactions
-exports.listTransactions = onCall(
-  { secrets: [getanchorSecretKey] },
+exports.safehavenGetTransfers = onCallLogged(
+  "safehavenGetTransfers",
+  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl] },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
-    const secretKey = getanchorSecretKey.value();
-    if (secretKey.length === 0) {
-      throw new HttpsError(
-        "invalid-argument",
-        "Getanchor Secret Key is not set",
-      );
-    }
+    const uid = data.auth?.uid;
+    if (!uid) throw new HttpsError("unauthenticated", "User is not authenticated");
 
-    validateData(data.data, [
-      { key: "customerId", message: "Customer ID is required" },
-    ]);
+    const acct = await _getSafehavenAccountForUser(uid);
+    const accountId =
+      data.data?.accountId?.trim() ||
+      acct.accountId ||
+      data.data?.customerId?.trim() ||
+      "";
 
-    const customerId = data.data.customerId.trim();
-    const queryParams = new URLSearchParams({ customerId });
-    if (data.data.from) queryParams.append("from", data.data.from);
-    if (data.data.to) queryParams.append("to", data.data.to);
+    const params = new URLSearchParams({
+      page: "0",
+      limit: "100",
+    });
+    if (accountId) params.append("accountId", accountId);
+    if (data.data?.from) params.append("fromDate", data.data.from);
+    if (data.data?.to) params.append("toDate", data.data.to);
 
-    
-    const url = `${BASE_URL}/transactions?${queryParams.toString()}`;
+    const resp = await safehavenRequest({
+      path: `/transfers?${params.toString()}`,
+      method: "GET",
+    });
 
-    return makeApiRequest({ url, method: "GET", secretKey });
+    const transfers = Array.isArray(resp.data) ? resp.data : [];
+
+    return {
+      data: transfers.map((tx) => ({
+        id: tx._id || tx.id || tx.paymentReference || "",
+        type: "Transaction",
+        attributes: {
+          amount: Math.round((tx.amount || 0) * 100),
+          status: tx.status || "PENDING",
+          direction: (tx.type || "").toLowerCase() === "inwards" ? "credit" : "debit",
+          narration: tx.narration || "",
+          reference: tx.paymentReference || "",
+          provider: tx.provider || "BANK",
+          createdAt: tx.createdAt || null,
+        },
+        _safehaven: tx,
+      })),
+      pagination: resp.pagination || null,
+    };
   },
 );
 
@@ -2983,6 +3710,200 @@ const verifySignature = (rawBody, signature, secret) => {
   return { valid: false, mode: "no-match" };
 };
 
+// SafeHaven webhook signature verifier (supports sha256 and sha1 variants)
+const verifySafehavenSignature = (rawBody, signature, secret) => {
+  if (!signature || !rawBody || !secret) {
+    return { valid: false, mode: "missing-input" };
+  }
+
+  const rawSignature = Array.isArray(signature) ? String(signature[0]) : String(signature);
+
+  // Try to detect tagged format like "sha256=..." or "sha1=..."
+  const tagMatch = rawSignature.match(/(sha1|sha256)\s*=\s*([A-Za-z0-9+/_=-]+)/i);
+  let algo = null;
+  let signatureValue = rawSignature;
+  if (tagMatch) {
+    algo = tagMatch[1].toLowerCase();
+    signatureValue = tagMatch[2];
+  } else {
+    signatureValue = rawSignature.trim();
+    if (/^[a-fA-F0-9]{64}$/.test(signatureValue)) algo = "sha256";
+    else if (/^[a-fA-F0-9]{40}$/.test(signatureValue)) algo = "sha1";
+    else algo = "sha256"; // default to sha256 when ambiguous
+  }
+
+  // Compute expected HMAC digest (hex)
+  const expectedHex = crypto.createHmac(algo, secret).update(rawBody).digest("hex");
+  const expectedDigest = Buffer.from(expectedHex, "hex");
+
+  // If provided signature is hex
+  if (/^[a-fA-F0-9]+$/.test(signatureValue)) {
+    const providedHex = signatureValue.toLowerCase();
+    if (_safeTimingEqualString(providedHex, expectedHex)) {
+      return { valid: true, mode: `${algo}-hex` };
+    }
+  }
+
+  // Try base64 / base64url forms
+  const b64 = _normalizeBase64(signatureValue);
+  if (b64) {
+    try {
+      const providedBuf = Buffer.from(b64, "base64");
+      if (_safeTimingEqual(providedBuf, expectedDigest)) {
+        return { valid: true, mode: `${algo}-base64` };
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  return { valid: false, mode: "no-match" };
+};
+
+// SafeHaven webhook endpoint - logs incoming events (no signature verification)
+safehavenApp.post("/", async (req, res) => {
+  try {
+    const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
+    const headers = req.headers || {};
+    const rawBodyString = rawBody ? rawBody.toString("utf8") : "";
+    let parsed = null;
+    try { parsed = rawBodyString ? JSON.parse(rawBodyString) : req.body; } catch (e) { parsed = req.body || null; }
+
+    console.log("[SafeHaven webhook] received", {
+      bodyPreview: rawBodyString.length > 1000 ? `${rawBodyString.slice(0, 1000)}...[truncated]` : rawBodyString,
+    });
+
+    // Persist webhook to Firestore for later inspection
+    await db.collection("safehavenWebhooks").add({
+      receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+      headers,
+      rawBody: rawBodyString,
+      body: parsed,
+      signatureHeader: null,
+      signatureVerified: null,
+      verificationMode: "disabled",
+    });
+
+    // Post-process some SafeHaven webhook events (non-blocking best-effort)
+    (async () => {
+      try {
+        const evtType = parsed && (parsed.type || parsed.eventType)
+          ? (parsed.type || parsed.eventType)
+          : null;
+
+        // identityCreditCheck is emitted when SafeHaven performs the small debit
+        // used to verify identity during BVN flows. We notify the user by device
+        // token and email when this occurs so the client can react.
+        if (evtType && evtType.toString().toLowerCase() === "identitycreditcheck") {
+          const payload = parsed.data || parsed;
+          const accountNumber = String(
+            payload.debitAccountNumber || payload.accountNumber || payload.debitAccount || "",
+          ).trim();
+          const status = String(payload.status || "").trim().toUpperCase();
+          const debitMsg = String(payload.debitMessage || payload.message || payload.reason || "").trim();
+
+          // Tie the event to the user who initiated identity verification.
+          // safehavenUserSetup is keyed by Firebase UID and stores identityId
+          // from safehavenInitiateIdentityVerification â€” this is the authoritative link.
+          const identityCheckId = String(payload._id || payload.id || "").trim();
+          let resolvedUid = null;
+
+          if (identityCheckId) {
+            try {
+              const setupQuery = await db
+                .collection("safehavenUserSetup")
+                .where("identityId", "==", identityCheckId)
+                .limit(1)
+                .get();
+              if (!setupQuery.empty) {
+                resolvedUid = setupQuery.docs[0].id; // doc ID is the Firebase UID
+                // Persist status so safehavenCreateSubAccount can skip a FAILED identityId
+                await setupQuery.docs[0].ref.set({
+                  identityCheckStatus: status,
+                  identityCheckMessage: debitMsg || null,
+                  identityCheckUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                }, { merge: true });
+                console.log(`[SafeHaven webhook] identityCreditCheck status ${status} stored for uid ${resolvedUid}, identityId ${identityCheckId}`);
+              } else {
+                console.log(`[SafeHaven webhook] no safehavenUserSetup found for identityId ${identityCheckId}`);
+              }
+            } catch (setupErr) {
+              console.warn("[SafeHaven webhook] failed to update identityCheckStatus:", setupErr.message);
+            }
+          }
+
+          if (resolvedUid) {
+            try {
+              const userSnap = await db.collection("users").doc(resolvedUid).get();
+              const userData = userSnap.exists ? userSnap.data() : {};
+              const deviceToken = userData.deviceToken || null;
+              const userEmail = userData.email || null;
+
+              const title = status === "FAILED" ? "Identity Verification Debit Failed" : "Identity Verification Debit";
+              const bodyMsg = status === "FAILED"
+                ? `Identity verification debit failed: ${debitMsg} (code: ${payload.debitResponsCode || ""})`
+                : `Identity verification debit ${status.toLowerCase()}.`;
+
+              // Send push notification (best-effort)
+              if (deviceToken) {
+                try {
+                  // await admin.messaging().send({
+                  //   token: deviceToken,
+                  //   notification: { title, body: bodyMsg },
+                  //   ...FCM_CHANNEL,
+                  // });
+                  // console.log(`SafeHaven webhook: pushed notification to ${resolvedUid}`);
+                } catch (msgErr) {
+                  console.error("SafeHaven webhook push error:", msgErr);
+                }
+              }
+
+              // Persist notification to user's notification feed
+              try {
+                await saveNotification(resolvedUid, {
+                  title,
+                  body: bodyMsg,
+                  type: "identity_credit_check",
+                  amount: payload.amount || null,
+                });
+              } catch (saveErr) {
+                console.error("SafeHaven webhook saveNotification error:", saveErr);
+              }
+
+              // Send email notification (best-effort)
+              if (userEmail) {
+                try {
+                  await sendNotifyEmail({
+                    to: userEmail,
+                    subject: title,
+                    text: bodyMsg,
+                    html: `<p>${bodyMsg}</p>`,
+                  });
+                  console.log(`SafeHaven webhook: emailed ${userEmail}`);
+                } catch (emailErr) {
+                  console.error("SafeHaven webhook email error:", emailErr);
+                }
+              }
+            } catch (notifyErr) {
+              console.error("[SafeHaven webhook] user notification error:", notifyErr);
+            }
+          } else {
+            console.log(`[SafeHaven webhook] identityCreditCheck: could not resolve user for identityId ${identityCheckId}`);
+          }
+        }
+      } catch (postErr) {
+        console.error("SafeHaven webhook post-processing error:", postErr);
+      }
+    })();
+
+    return res.status(200).send("OK");
+  } catch (err) {
+    console.error("[SafeHaven webhook] processing error:", err);
+    return res.status(400).json({ error: "Invalid payload" });
+  }
+});
+
+// Anchor webhook (existing root handler)
 app.post("/", async (req, res) => {
   try {
     const candidateSecrets = [
@@ -4850,9 +5771,7 @@ app.post("/", async (req, res) => {
               secretKey: anchorApiSecretKey,
             });
             const apiPayment = apiPaymentResp?.data;
-            const apiStatusRaw =
-              apiPayment?.attributes?.status || apiPayment?.status || "";
-            const apiStatus = String(apiStatusRaw).toUpperCase();
+            const apiStatus = apiPayment?.attributes?.status;
             const apiAmount = apiPayment?.attributes?.amount;
 
             if (!apiPayment?.id) {
@@ -4861,27 +5780,11 @@ app.post("/", async (req, res) => {
               );
               break;
             }
-            // Some Anchor environments omit status on /payments/{id}. If absent,
-            // still accept once id and amount are validated.
-            if (
-              apiStatus &&
-              ![
-                "SETTLED",
-                "SUCCESSFUL",
-                "RECEIVED",
-                "COMPLETED",
-                "PAID",
-              ].includes(apiStatus)
-            ) {
+            if (apiStatus !== "SETTLED" && apiStatus !== "SUCCESSFUL") {
               console.error(
                 `payment.settled REJECTED ? Anchor API status is "${apiStatus}" for paymentId ${paymentId} (expected SETTLED)`,
               );
               break;
-            }
-            if (!apiStatus) {
-              console.warn(
-                `payment.settled cross-validation: Anchor API status missing for paymentId ${paymentId}; continuing because id and amount matched`,
-              );
             }
             if (apiAmount !== amount) {
               console.error(
@@ -5143,12 +6046,12 @@ exports.getanchorWebhook = onRequest(
     // SECURITY: getanchorSecretKey is needed for cross-validation API calls
     // inside the webhook handler (verifying events against Anchor's API).
     secrets: [
-      anchorWebhookSecret,
-      anchorWebhookSecretSecondary,
-      getanchorSecretKey,
-      smtpHost,
-      smtpUser,
-      smtpPass,
+        anchorWebhookSecret,
+        anchorWebhookSecretSecondary,
+        getanchorSecretKey,
+        smtpHost,
+        smtpUser,
+        smtpPass,
     ],
   },
   app,
@@ -5568,18 +6471,11 @@ exports.sendSuperAgentWelcomeEmail = onCall(
 );
 
 // List Billers (generic for any category)
-exports.listBillers = onCall(
-  { secrets: [getanchorSecretKey] },
+exports.safehavenGetServiceCategories = onCallLogged(
+  "safehavenGetServiceCategories",
+  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl] },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
-    const secretKey = getanchorSecretKey.value();
-    if (secretKey.length === 0) {
-      throw new HttpsError(
-        "invalid-argument",
-        "Getanchor Secret Key is not set",
-      );
-    }
-
     validateData(data.data, [
       {
         key: "category",
@@ -5592,45 +6488,99 @@ exports.listBillers = onCall(
     ]);
 
     const category = data.data.category.trim().toLowerCase();
-    
-    const url = `${BASE_URL}/bills/billers?category=${encodeURIComponent(
-      category,
-    )}`;
 
-    return makeApiRequest({ url, method: "GET", secretKey });
+    const servicesResp = await safehavenRequest({
+      path: "/vas/services",
+      method: "GET",
+    });
+    const services = Array.isArray(servicesResp.data) ? servicesResp.data : [];
+
+    const keywords = {
+      airtime: ["airtime"],
+      data: ["data"],
+      electricity: ["electricity", "power", "utility"],
+      television: ["television", "cable", "tv"],
+    };
+    const lookup = keywords[category] || [category];
+
+    const service = services.find((item) => {
+      const haystack = `${item?.name || ""} ${item?.identifier || ""}`.toLowerCase();
+      return lookup.some((word) => haystack.includes(word));
+    });
+
+    if (!service?._id) {
+      throw new HttpsError("not-found", `No Safehaven service found for ${category}`);
+    }
+
+    const categoriesResp = await safehavenRequest({
+      path: `/vas/service/${encodeURIComponent(service._id)}/service-categories`,
+      method: "GET",
+    });
+    const billers = Array.isArray(categoriesResp.data) ? categoriesResp.data : [];
+
+    return {
+      data: billers.map((biller) => ({
+        id: biller._id || biller.identifier,
+        type: "Biller",
+        attributes: {
+          name: biller.name || biller.identifier || "",
+          slug: biller.identifier || biller._id,
+          category,
+          logoUrl: biller.logoUrl || null,
+          amountType: biller.isFixedAmount ? "FIXED" : "VARIABLE",
+        },
+        _safehaven: biller,
+      })),
+    };
   },
 );
 
 // Get Biller Products (generic for any biller)
-exports.getBillerProducts = onCall(
-  { secrets: [getanchorSecretKey] },
+exports.safehavenGetCategoryProducts = onCallLogged(
+  "safehavenGetCategoryProducts",
+  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl] },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
-    const secretKey = getanchorSecretKey.value();
-    if (secretKey.length === 0) {
-      throw new HttpsError(
-        "invalid-argument",
-        "Getanchor Secret Key is not set",
-      );
-    }
-
     validateData(data.data, [
       { key: "billerId", message: "Biller ID is required" },
     ]);
 
-    const billerId = data.data.billerId.trim();
-    
-    const url = `${BASE_URL}/bills/billers/${encodeURIComponent(
-      billerId,
-    )}/products`;
+    const serviceCategoryId = data.data.billerId.trim();
 
-    return makeApiRequest({ url, method: "GET", secretKey });
+    const resp = await safehavenRequest({
+      path: `/vas/service-category/${encodeURIComponent(serviceCategoryId)}/products`,
+      method: "GET",
+    });
+    const products = Array.isArray(resp.data) ? resp.data : [];
+
+    return {
+      data: products.map((product) => {
+        const amountKobo =
+          product.amount == null ? 0 : Math.round(Number(product.amount) * 100);
+        return {
+          id: product.bundleCode || product.slug || product.name,
+          type: "BillerProduct",
+          attributes: {
+            slug: product.bundleCode || product.slug || product.name,
+            name: product.name || "",
+            duration: product.duration || null,
+            isAmountFixed: Boolean(product.isAmountFixed),
+            price: {
+              minimumAmount: amountKobo,
+              maximumAmount: product.isAmountFixed ? amountKobo : null,
+            },
+          },
+          _safehaven: product,
+        };
+      }),
+    };
   },
 );
 exports.uploadDocument = onCall(
   { secrets: [getanchorSecretKey] },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
+    await _assertAnchorLegacyEnabled();
 
     const secretKey = getanchorSecretKey.value();
 
@@ -5807,20 +6757,38 @@ exports.fetchCustomerAccount = onCall(
     return makeApiRequest({ url, method: "GET", secretKey });
   },
 );
-// Initiate Bill Payment (generic for airtime, data, electricity, cabletv)
-exports.initiateBillPayment = onCall(
-  { secrets: [getanchorSecretKey] },
+// Verify meter number or smart card number before payment
+exports.safehavenVerifyVas = onCallLogged(
+  "safehavenVerifyVas",
+  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl] },
   async (data, context) => {
-    //if (!data.auth.token.email_verified===true) {
-    //   throw new HttpsError('unauthenticated', 'You must be signed in to call this function.');
-    // }
-    const secretKey = getanchorSecretKey.value();
-    if (secretKey.length === 0) {
-      throw new HttpsError(
-        "invalid-argument",
-        "Getanchor Secret Key is not set",
-      );
-    }
+    await ensureVerifiedOrStandUser(data.auth);
+    validateData(data.data, [
+      { key: "serviceCategoryId", message: "Service category ID is required" },
+      { key: "entityNumber", message: "Entity number (meter/card number) is required" },
+    ]);
+
+    const resp = await safehavenRequest({
+      path: "/vas/verify",
+      method: "POST",
+      body: {
+        serviceCategoryId: data.data.serviceCategoryId.trim(),
+        entityNumber: data.data.entityNumber.trim(),
+      },
+    });
+
+    return { data: resp?.data || resp };
+  },
+);
+
+// Initiate Bill Payment (generic for airtime, data, electricity, cabletv)
+exports.safehavenPurchaseVas = onCallLogged(
+  "safehavenPurchaseVas",
+  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl] },
+  async (data, context) => {
+    await ensureVerifiedOrStandUser(data.auth);
+    const uid = data.auth?.uid;
+    if (!uid) throw new HttpsError("unauthenticated", "User is not authenticated");
 
     validateData(data.data, [
       {
@@ -5830,7 +6798,6 @@ exports.initiateBillPayment = onCall(
           ["Airtime", "Data", "Electricity", "Television"].includes(v),
       },
       { key: "accountId", message: "Account ID is required" },
-      { key: "accountType", message: "Account Type is required" },
       {
         key: "amount",
         message: "Valid amount is required",
@@ -5841,67 +6808,182 @@ exports.initiateBillPayment = onCall(
 
     const type = data.data.type.trim();
     const accountId = data.data.accountId.trim();
-    const accountType = data.data.accountType.trim();
     const amount = data.data.amount;
     const reference = data.data.reference.trim();
+    const serviceCategoryRaw = (data.data.provider || data.data.productSlug || "").trim();
+    if (!serviceCategoryRaw) {
+      throw new HttpsError("invalid-argument", "Provider or product slug is required");
+    }
 
-    const attributes = { amount, reference };
+    let serviceCategoryId = serviceCategoryRaw;
+    const looksLikeObjectId = /^[a-f0-9]{24}$/i.test(serviceCategoryRaw);
+    if (!looksLikeObjectId) {
+      const servicesResp = await safehavenRequest({
+        path: "/vas/services",
+        method: "GET",
+      });
+      const services = Array.isArray(servicesResp.data) ? servicesResp.data : [];
 
+      const typeToServiceKeywords = {
+        Airtime: ["airtime"],
+        Data: ["data"],
+        Electricity: ["electricity", "power", "utility"],
+        Television: ["television", "cable", "tv"],
+      };
+
+      const lookup = typeToServiceKeywords[type] || [type.toLowerCase()];
+      const service = services.find((item) => {
+        const haystack = `${item?.name || ""} ${item?.identifier || ""}`.toLowerCase();
+        return lookup.some((word) => haystack.includes(word));
+      });
+
+      if (service?._id) {
+        const categoriesResp = await safehavenRequest({
+          path: `/vas/service/${encodeURIComponent(service._id)}/service-categories`,
+          method: "GET",
+        });
+        const categories = Array.isArray(categoriesResp.data) ? categoriesResp.data : [];
+        const target = serviceCategoryRaw.toLowerCase();
+
+        const matchedCategory = categories.find((item) => {
+          const idText = String(item?._id || "").toLowerCase();
+          const identifierText = String(item?.identifier || "").toLowerCase();
+          const nameText = String(item?.name || "").toLowerCase();
+          return idText === target ||
+            identifierText === target ||
+            nameText === target ||
+            nameText.includes(target);
+        });
+
+        if (matchedCategory?._id) {
+          serviceCategoryId = String(matchedCategory._id);
+        }
+      }
+    }
+
+    const acctInfo = await _getSafehavenAccountForUser(uid);
+    let debitAccountNumber = acctInfo?.accountNumber || "";
+    if (!debitAccountNumber || (accountId && acctInfo?.accountId && acctInfo.accountId !== accountId)) {
+      const accountResp = await safehavenRequest({
+        path: `/accounts/${encodeURIComponent(accountId)}`,
+        method: "GET",
+      });
+      debitAccountNumber = accountResp?.data?.accountNumber || debitAccountNumber;
+    }
+    if (!debitAccountNumber) {
+      throw new HttpsError("failed-precondition", "Virtual account not set up");
+    }
+
+    let safehavenPath = "";
+    let requestPayload = {};
     switch (type) {
       case "Airtime":
         validateData(data.data, [
           { key: "phoneNumber", message: "Phone number is required" },
-          { key: "provider", message: "Provider slug is required" },
         ]);
-        attributes.phoneNumber = data.data.phoneNumber.trim();
-        attributes.provider = data.data.provider.trim();
+        safehavenPath = "/vas/pay/airtime";
+        requestPayload = {
+          amount: amount / 100,
+          channel: "WEB",
+          serviceCategoryId,
+          debitAccountNumber,
+          phoneNumber: data.data.phoneNumber.trim(),
+        };
         break;
       case "Data":
         validateData(data.data, [
           { key: "phoneNumber", message: "Phone number is required" },
           { key: "productSlug", message: "Product slug is required" },
         ]);
-        attributes.phoneNumber = data.data.phoneNumber.trim();
-        attributes.productSlug = data.data.productSlug.trim();
+        safehavenPath = "/vas/pay/data";
+        requestPayload = {
+          amount: amount / 100,
+          channel: "WEB",
+          serviceCategoryId,
+          bundleCode: data.data.productSlug.trim(),
+          debitAccountNumber,
+          phoneNumber: data.data.phoneNumber.trim(),
+        };
         break;
       case "Electricity":
         validateData(data.data, [
           { key: "meterAccountNumber", message: "Meter number is required" },
+          { key: "vendType", message: "Vend type is required (call safehavenVerifyVas first)" },
         ]);
-        attributes.meterAccountNumber = data.data.meterAccountNumber.trim();
-        attributes.phoneNumber = data.data.phoneNumber.trim();
-        attributes.productSlug = data.data.productSlug.trim();
+        safehavenPath = "/vas/pay/utility";
+        requestPayload = {
+          amount: amount / 100,
+          channel: "WEB",
+          serviceCategoryId,
+          debitAccountNumber,
+          meterNumber: data.data.meterAccountNumber.trim(),
+          vendType: data.data.vendType.trim(),
+          externalReference: reference,
+        };
         break;
       case "Television":
         validateData(data.data, [
           { key: "smartCardNumber", message: "Smart card number is required" },
-          { key: "productSlug", message: "Product slug is required" },
         ]);
-        attributes.smartCardNumber = data.data.smartCardNumber.trim();
-        attributes.productSlug = data.data.productSlug.trim();
-        attributes.phoneNumber = data.data.phoneNumber.trim();
+        safehavenPath = "/vas/pay/cable-tv";
+        requestPayload = {
+          amount: amount / 100,
+          channel: "WEB",
+          serviceCategoryId,
+          bundleCode: data.data.productSlug?.trim() || serviceCategoryId,
+          debitAccountNumber,
+          cardNumber: data.data.smartCardNumber.trim(),
+        };
         break;
       default:
         throw new HttpsError("invalid-argument", "Invalid bill type");
     }
 
-    const url = `/bills`;
-    const body = {
-      data: {
-        type,
-        attributes,
-        relationships: {
-          account: {
-            data: {
-              type: accountType,
-              id: accountId,
-            },
-          },
-        },
+    const resp = await safehavenRequest({
+      path: safehavenPath,
+      method: "POST",
+      body: requestPayload,
+    });
+
+    const bill = resp?.data || {};
+    const baseAttributes = {
+      amount,
+      reference,
+      status: bill.status || (resp?.responseCode === "00" ? "successful" : "PENDING"),
+      channel: requestPayload.channel || "WEB",
+      providerReference: bill.reference || bill.id || reference,
+      receiver: bill.receiver || null,
+      message: resp?.message || null,
+      failureReason: resp?.message || null,
+      createdAt: new Date().toISOString(),
+      detail: {
+        provider: bill?.receiver?.distribution || serviceCategoryId,
+        product: data.data.productSlug || serviceCategoryId,
+        token: bill?.token || bill?.unitsToken || null,
+        units: bill?.units || null,
       },
     };
 
-    return makeApiRequest({ url, method: "POST", secretKey, body });
+    if (type === "Airtime" || type === "Data") {
+      baseAttributes.phoneNumber = data.data.phoneNumber?.trim() || null;
+    }
+    if (type === "Television") {
+      baseAttributes.smartCardNumber = data.data.smartCardNumber?.trim() || null;
+      baseAttributes.detail.smartCardNumber = baseAttributes.smartCardNumber;
+    }
+    if (type === "Electricity") {
+      baseAttributes.meterNumber = data.data.meterAccountNumber?.trim() || null;
+      baseAttributes.meterAccountNumber = baseAttributes.meterNumber;
+    }
+
+    return {
+      data: {
+        id: bill.id || bill.reference || reference,
+        type,
+        attributes: baseAttributes,
+        _safehaven: resp,
+      },
+    };
   },
 );
 exports.sendTransactionNotification = onCall(
@@ -8901,8 +9983,9 @@ exports.resetPasswordWithOTP = onCall(async (request) => {
 // Auth: RS256 client assertion ? OAuth2 access_token (cached per instance).
 
 let _safehavenToken = null;
-let _safehavenTokenExpiresAt = 0;
+let _safehavenAtmTokenExpiresAt = 0;
 let _safehavenApiBase = null;
+let _safehavenAtmTokenCacheKey = null;
 
 function _base64UrlEncode(buf) {
   return buf.toString("base64")
@@ -8911,24 +9994,24 @@ function _base64UrlEncode(buf) {
     .replace(/=/g, "");
 }
 
-async function _getSafehavenAccessToken(clientId, privateKeyPem, companyUrl) {
+async function _getSafehavenAccessToken(clientId, privateKeyPem, companyUrl, apiBase) {
   const now = Math.floor(Date.now() / 1000);
+  const cacheKey = `${apiBase}|${clientId}`;
 
   // Return cached token if still valid (60 s grace buffer)
-  if (_safehavenToken && _safehavenApiBase && _safehavenTokenExpiresAt > now + 60) {
+  if (
+    _safehavenToken &&
+    _safehavenApiBase === apiBase &&
+    _safehavenAtmTokenCacheKey === cacheKey &&
+    _safehavenAtmTokenExpiresAt > now + 60
+  ) {
     console.log("[SafeHaven] Reusing cached access token");
     return {accessToken: _safehavenToken, apiBase: _safehavenApiBase};
   }
 
   console.log("[SafeHaven] Generating new client assertion for clientId=", clientId);
 
-  const envBase = process.env.SAFEHAVEN_AUTH_BASE_URL;
-  const preferredBase = typeof envBase === "string" ? envBase.trim() : "";
-  const authBases = [...new Set([
-    preferredBase,
-    "https://api.safehavenmfb.com",
-    "https://api.sandbox.safehavenmfb.com",
-  ].filter((v) => v.length > 0))];
+  const authBases = [apiBase].filter((v) => typeof v === "string" && v.length > 0);
 
   const attempts = [];
 
@@ -8979,8 +10062,9 @@ async function _getSafehavenAccessToken(clientId, privateKeyPem, companyUrl) {
 
       const expiresIn = typeof tokenBody.expires_in === "number" ? tokenBody.expires_in : 3600;
       _safehavenToken = tokenBody.access_token;
-      _safehavenTokenExpiresAt = now + expiresIn;
+      _safehavenAtmTokenExpiresAt = now + expiresIn;
       _safehavenApiBase = apiBase;
+      _safehavenAtmTokenCacheKey = cacheKey;
 
       console.log(`[SafeHaven] Access token obtained from ${apiBase}, expires in ${expiresIn}s`);
       return {accessToken: _safehavenToken, apiBase: _safehavenApiBase};
@@ -9003,9 +10087,11 @@ exports.reconcileAtmTransaction = onCall(
       throw new HttpsError("invalid-argument", "RRN is required");
     }
 
-    const clientId   = safehavenClientId.value();
-    const privateKey = safehavenPrivateKey.value();
-    const companyUrl = safehavenCompanyUrl.value();
+    const safehavenConfig = await _resolveSafehavenConfig();
+    const clientId = safehavenConfig.clientId;
+    const privateKey = safehavenConfig.privateKeyPem;
+    const companyUrl = safehavenConfig.companyUrl;
+    const preferredApiBase = safehavenConfig.baseUrl;
 
     if (!clientId || !privateKey || !companyUrl) {
       throw new HttpsError("internal", "Safe Haven credentials are not configured");
@@ -9015,7 +10101,12 @@ exports.reconcileAtmTransaction = onCall(
     let accessToken;
     let apiBase;
     try {
-      const authResult = await _getSafehavenAccessToken(clientId, privateKey, companyUrl);
+      const authResult = await _getSafehavenAccessToken(
+        clientId,
+        privateKey,
+        companyUrl,
+        preferredApiBase,
+      );
       accessToken = authResult.accessToken;
       apiBase = authResult.apiBase;
     } catch (authErr) {
@@ -9247,9 +10338,11 @@ exports.backfillAtmTransactionsFromStatement = onCall(
       throw new HttpsError("unauthenticated", "Authentication required");
     }
 
-    const clientId = safehavenClientId.value();
-    const privateKey = safehavenPrivateKey.value();
-    const companyUrl = safehavenCompanyUrl.value();
+    const safehavenConfig = await _resolveSafehavenConfig();
+    const clientId = safehavenConfig.clientId;
+    const privateKey = safehavenConfig.privateKeyPem;
+    const companyUrl = safehavenConfig.companyUrl;
+    const preferredApiBase = safehavenConfig.baseUrl;
     if (!clientId || !privateKey || !companyUrl) {
       throw new HttpsError("internal", "Safe Haven credentials are not configured");
     }
@@ -9257,7 +10350,12 @@ exports.backfillAtmTransactionsFromStatement = onCall(
     let accessToken;
     let apiBase;
     try {
-      const authResult = await _getSafehavenAccessToken(clientId, privateKey, companyUrl);
+      const authResult = await _getSafehavenAccessToken(
+        clientId,
+        privateKey,
+        companyUrl,
+        preferredApiBase,
+      );
       accessToken = authResult.accessToken;
       apiBase = authResult.apiBase;
     } catch (authErr) {
@@ -11473,7 +12571,7 @@ exports.sudoGetCardTransactions = onCall(
   },
 );
 
-// Sudo webhook receiver � handles all Gateway funding source events.
+// Sudo webhook receiver ? handles all Gateway funding source events.
 // Events: authorization.request, card.balance, transaction.created,
 //         authorization.declined, transaction.refund, card.terminated
 exports.sudoWebhook = onRequest(
@@ -11575,7 +12673,7 @@ exports.sudoWebhook = onRequest(
             ? `?${pendingAmount.toLocaleString("en-NG", {minimumFractionDigits: 2, maximumFractionDigits: 2})}`
             : `$${pendingAmount.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
           const merchantDel = eventObject?.merchant?.name || "Unknown merchant";
-          console.log(`[sudoWebhook] Auth DECLINED (card terminated) � card:${sudoCardId}`);
+          console.log(`[sudoWebhook] Auth DECLINED (card terminated) ? card:${sudoCardId}`);
           await notifyUser(found.userId, "Transaction Declined", `A ${displayAmountDel} payment at ${merchantDel} was declined. This card has been terminated.`, "card_declined");
           if (eventObject?._id) {
             await db.collection("sudo_declined_auths").doc(eventObject._id).set({ declinedAt: admin.firestore.FieldValue.serverTimestamp(), declineReason: "card_terminated" });
@@ -11594,11 +12692,11 @@ exports.sudoWebhook = onRequest(
             ? `?${pendingAmount.toLocaleString('en-NG', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`
             : `$${pendingAmount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
           const merchant = eventObject?.merchant?.name || "Unknown merchant";
-          console.log(`[sudoWebhook] Auth DECLINED (frozen) � card:${sudoCardId} amount:${pendingAmount} ${currency}`);
-          const frozenEmailHtml = `<div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:24px;"><h2 style="color:#c62828;">Card Frozen � Transaction Declined</h2><p>A <strong>${displayAmount}</strong> payment at <strong>${merchant}</strong> was blocked because your virtual card is frozen.</p><p>To unfreeze your card, open PadiPay &rarr; Cards &rarr; tap your card &rarr; tap <em>Unfreeze Card</em>.</p><p style="color:#888;font-size:12px;">If you did not freeze your card, contact support immediately.</p></div>`;
+          console.log(`[sudoWebhook] Auth DECLINED (frozen) ? card:${sudoCardId} amount:${pendingAmount} ${currency}`);
+          const frozenEmailHtml = `<div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:24px;"><h2 style="color:#c62828;">Card Frozen ? Transaction Declined</h2><p>A <strong>${displayAmount}</strong> payment at <strong>${merchant}</strong> was blocked because your virtual card is frozen.</p><p>To unfreeze your card, open PadiPay &rarr; Cards &rarr; tap your card &rarr; tap <em>Unfreeze Card</em>.</p><p style="color:#888;font-size:12px;">If you did not freeze your card, contact support immediately.</p></div>`;
           await notifyUser(
             found.userId,
-            "Card Frozen � Transaction Declined",
+            "Card Frozen ? Transaction Declined",
             `A ${displayAmount} transaction at ${merchant} was declined because your card is frozen.`,
             "card_declined",
             frozenEmailHtml
@@ -11634,7 +12732,7 @@ exports.sudoWebhook = onRequest(
             ? `?${pendingAmount.toLocaleString('en-NG', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`
             : `$${pendingAmount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
           const merchant = eventObject?.merchant?.name || "Unknown merchant";
-          console.log(`[sudoWebhook] Auth DECLINED (channel blocked: ${channelLabel}) � card:${sudoCardId} amount:${pendingAmount} ${currency}`);
+          console.log(`[sudoWebhook] Auth DECLINED (channel blocked: ${channelLabel}) ? card:${sudoCardId} amount:${pendingAmount} ${currency}`);
           const channelName = channelLabel.toUpperCase();
           const channelFriendly = channelLabel === 'pos' ? 'POS (in-store)' : channelLabel === 'atm' ? 'ATM' : 'Online (Web)';
           const notifTitle = `${channelFriendly} Transaction Declined`;
@@ -11652,7 +12750,7 @@ exports.sudoWebhook = onRequest(
     <strong>How to enable ${channelFriendly} transactions:</strong><br>
     Open PadiPay &rarr; Cards &rarr; tap your card &rarr; tap the <em>\u2022\u2022\u2022</em> menu &rarr; <strong>Card Channels</strong> &rarr; turn on <strong>${channelName}</strong>.
   </div>
-  <p style="color:#888;font-size:12px;">If you did not attempt this transaction, your card details may be compromised � freeze your card immediately from the app.</p>
+  <p style="color:#888;font-size:12px;">If you did not attempt this transaction, your card details may be compromised ? freeze your card immediately from the app.</p>
 </div>`;
           await notifyUser(found.userId, notifTitle, notifBody, "card_declined", emailHtml);
           if (eventObject?._id) {
@@ -11676,7 +12774,7 @@ exports.sudoWebhook = onRequest(
             const displayAmount = currency === "NGN"
               ? `?${pendingAmount.toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
               : `$${pendingAmount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-            console.log(`[sudoWebhook] Auth DECLINED (merchant blocked: ${merchantKey}) � card:${sudoCardId} amount:${pendingAmount} ${currency}`);
+            console.log(`[sudoWebhook] Auth DECLINED (merchant blocked: ${merchantKey}) ? card:${sudoCardId} amount:${pendingAmount} ${currency}`);
             const notifTitle = "Merchant Transaction Declined";
             const notifBody = `A ${displayAmount} payment at ${incomingMerchantName} was declined. This merchant is blocked on your card.`;
             const emailHtml = `
@@ -11692,7 +12790,7 @@ exports.sudoWebhook = onRequest(
     <strong>To unblock this merchant:</strong><br>
     Open PadiPay &rarr; Cards &rarr; tap your card &rarr; tap the <em>\u2022\u2022\u2022</em> menu &rarr; <strong>Manage Merchants</strong> &rarr; turn on <strong>${incomingMerchantName}</strong>.
   </div>
-  <p style="color:#888;font-size:12px;">If you did not attempt this transaction, your card details may be compromised � freeze your card immediately from the app.</p>
+  <p style="color:#888;font-size:12px;">If you did not attempt this transaction, your card details may be compromised ? freeze your card immediately from the app.</p>
 </div>`;
             await notifyUser(found.userId, notifTitle, notifBody, "card_declined", emailHtml);
             if (eventObject?._id) {
@@ -11717,12 +12815,12 @@ exports.sudoWebhook = onRequest(
         if (currency === "NGN") {
           const balanceKobo = await getAnchorBalanceKobo(found.userId);
           if (balanceKobo !== null) {
-            // Sudo sends amount in naira, Anchor balance is in kobo � convert to compare
+            // Sudo sends amount in naira, Anchor balance is in kobo ? convert to compare
             approve = balanceKobo >= pendingAmount * 100;
             balanceConfirmed = true;
           }
         }
-        // USD cards: Sudo settlement account covers it � no prefund needed.
+        // USD cards: Sudo settlement account covers it ? no prefund needed.
 
         // -- Prefund: transfer user ? company before approving ----------
         // Only when we confirmed the user has sufficient balance (not just defaulting approve).
@@ -11760,7 +12858,7 @@ exports.sudoWebhook = onRequest(
             if (prefundStatus === "FAILED") {
               throw new Error(prefundResult?.data?.attributes?.failureReason || "Prefund transfer returned FAILED");
             }
-            // Log prefund � internal only, not shown in user UI
+            // Log prefund ? internal only, not shown in user UI
             await db.collection("sudo_card_prefunds").doc(prefundLogKey).set({
               userId: found.userId, cardId: sudoCardId,
               amountKobo, currency: "NGN",
@@ -11769,7 +12867,7 @@ exports.sudoWebhook = onRequest(
               status: "prefunded",
               createdAt: admin.firestore.FieldValue.serverTimestamp(),
             });
-            console.log(`[sudoWebhook] Prefund user?company OK � transferId:${prefundTransferId} amountKobo:${amountKobo}`);
+            console.log(`[sudoWebhook] Prefund user?company OK ? transferId:${prefundTransferId} amountKobo:${amountKobo}`);
           } catch (prefundErr) {
             approve = false;
             authDeclineReason = "prefund_failed";
@@ -11796,14 +12894,14 @@ exports.sudoWebhook = onRequest(
           await notifyUser(
             found.userId,
             "Transaction Declined",
-            `A ${displayAmount} payment at ${merchant} was declined � insufficient balance.`,
+            `A ${displayAmount} payment at ${merchant} was declined ? insufficient balance.`,
             "card_declined",
             insufficientEmailHtml
           );
         }
         const responseCode = approve ? "00" : "51";
         const respBody = { statusCode: 200, data: { responseCode } };
-        console.log(`[sudoWebhook] Auth ${approve ? "APPROVED" : "DECLINED"} � card:${sudoCardId} amount:${pendingAmount} ${currency} | response: ${JSON.stringify(respBody)}`);
+        console.log(`[sudoWebhook] Auth ${approve ? "APPROVED" : "DECLINED"} ? card:${sudoCardId} amount:${pendingAmount} ${currency} | response: ${JSON.stringify(respBody)}`);
 
         // If a prefund was completed but something goes wrong before we can confirm
         // the approval to Sudo, reverse the transfer (company ? user).
@@ -11811,7 +12909,7 @@ exports.sudoWebhook = onRequest(
           try {
             return res.status(200).json(respBody);
           } catch (sendErr) {
-            console.error(`[sudoWebhook] Response failed after prefund � reversing transfer for auth:${prefundLogKey}`, sendErr.message);
+            console.error(`[sudoWebhook] Response failed after prefund ? reversing transfer for auth:${prefundLogKey}`, sendErr.message);
             try {
               const userSnap = await db.collection("users").doc(found.userId).get();
               const userVaData = userSnap.data()?.getAnchorData?.virtualAccount?.data;
@@ -11837,7 +12935,7 @@ exports.sudoWebhook = onRequest(
                   idempotencyKey: reversalKey,
                 });
                 const reversalTransferId = reversalResult?.data?.id ?? null;
-                console.log(`[sudoWebhook] Reversal company?user OK � transferId:${reversalTransferId}`);
+                console.log(`[sudoWebhook] Reversal company?user OK ? transferId:${reversalTransferId}`);
                 await db.collection("sudo_card_prefunds").doc(prefundLogKey).update({
                   status: "reversed",
                   reversalTransferId,
@@ -11846,7 +12944,7 @@ exports.sudoWebhook = onRequest(
                 }).catch(() => {});
               }
             } catch (reversalErr) {
-              console.error(`[sudoWebhook] Reversal ALSO FAILED � MANUAL INTERVENTION NEEDED auth:${prefundLogKey}`, reversalErr.message);
+              console.error(`[sudoWebhook] Reversal ALSO FAILED ? MANUAL INTERVENTION NEEDED auth:${prefundLogKey}`, reversalErr.message);
               await db.collection("sudo_card_prefunds").doc(prefundLogKey).update({
                 status: "reversal_failed",
                 reversalError: reversalErr.message,
@@ -11908,7 +13006,7 @@ exports.sudoWebhook = onRequest(
               declineReason = declinedData.declineReason || null;
               declineChannelLabel = declinedData.channelLabel || null;
               await db.collection("sudo_declined_auths").doc(authId).delete();
-              console.log(`[sudoWebhook] transaction.created: auth ${authId} found in declined cache � treating as declined (reason: ${declineReason})`);
+              console.log(`[sudoWebhook] transaction.created: auth ${authId} found in declined cache ? treating as declined (reason: ${declineReason})`);
             }
           }
         }
@@ -11916,7 +13014,7 @@ exports.sudoWebhook = onRequest(
         const found = await findUserByCardId(sudoCardId);
         if (found) {
           // Dedup: if authorization.declined already wrote a card_declined doc for this
-          // reference, skip � prevents duplicate entries when both events fire for the same tx.
+          // reference, skip ? prevents duplicate entries when both events fire for the same tx.
           let skipWrite = false;
           if (!wasDeclined && ref) {
             const dupSnap = await db.collection("users").doc(found.userId)
@@ -11927,13 +13025,13 @@ exports.sudoWebhook = onRequest(
               .get();
             if (!dupSnap.empty) {
               skipWrite = true;
-              console.log(`[sudoWebhook] transaction.created skipped � card_declined already exists for ref:${ref}`);
+              console.log(`[sudoWebhook] transaction.created skipped ? card_declined already exists for ref:${ref}`);
             }
           }
 
           if (!skipWrite) {
             if (wasDeclined) {
-              console.log(`[sudoWebhook] transaction.created for DECLINED auth � skipping spend notification. card:${sudoCardId} amount:${amount} ${currency}`);
+              console.log(`[sudoWebhook] transaction.created for DECLINED auth ? skipping spend notification. card:${sudoCardId} amount:${amount} ${currency}`);
             } else {
               await notifyUser(
                 found.userId, "Card Transaction",
@@ -12006,7 +13104,7 @@ exports.sudoWebhook = onRequest(
             }
           }
         }
-        console.log(`[sudoWebhook] transaction.created processed � card:${sudoCardId} amount:${amount} ${currency} declined:${wasDeclined}`);
+        console.log(`[sudoWebhook] transaction.created processed ? card:${sudoCardId} amount:${amount} ${currency} declined:${wasDeclined}`);
         return res.status(200).json({ ok: true });
       }
 
@@ -12033,7 +13131,7 @@ exports.sudoWebhook = onRequest(
             if (declinedDoc.exists) {
               alreadyHandled = true;
               await db.collection("sudo_declined_auths").doc(authId).delete();
-              console.log(`[sudoWebhook] authorization.declined: auth ${authId} already handled by authorization.request � skipping duplicate`);
+              console.log(`[sudoWebhook] authorization.declined: auth ${authId} already handled by authorization.request ? skipping duplicate`);
             }
           }
 
@@ -12043,7 +13141,7 @@ exports.sudoWebhook = onRequest(
               "Transaction Declined",
               `${displayAmount} at ${merchant} was declined: ${reason}`,
               "card_declined",
-              `<div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:24px;"><h2 style="color:#c62828;">Transaction Declined</h2><table style="width:100%;border-collapse:collapse;margin:16px 0;"><tr><td style="padding:8px 0;color:#666;">Merchant</td><td style="padding:8px 0;font-weight:600;">${merchant}</td></tr><tr><td style="padding:8px 0;color:#666;">Amount</td><td style="padding:8px 0;font-weight:600;">${displayAmount}</td></tr><tr><td style="padding:8px 0;color:#666;">Reason</td><td style="padding:8px 0;font-weight:600;color:#c62828;">${reason}</td></tr></table><p style="color:#888;font-size:12px;">If you did not attempt this transaction, your card details may be compromised � freeze your card immediately from the app.</p></div>`
+              `<div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:24px;"><h2 style="color:#c62828;">Transaction Declined</h2><table style="width:100%;border-collapse:collapse;margin:16px 0;"><tr><td style="padding:8px 0;color:#666;">Merchant</td><td style="padding:8px 0;font-weight:600;">${merchant}</td></tr><tr><td style="padding:8px 0;color:#666;">Amount</td><td style="padding:8px 0;font-weight:600;">${displayAmount}</td></tr><tr><td style="padding:8px 0;color:#666;">Reason</td><td style="padding:8px 0;font-weight:600;color:#c62828;">${reason}</td></tr></table><p style="color:#888;font-size:12px;">If you did not attempt this transaction, your card details may be compromised ? freeze your card immediately from the app.</p></div>`
             );
             await db.collection("users").doc(found.userId).collection("transactions").add({
               type: "card_declined", source: "sudo_card",
@@ -12089,7 +13187,7 @@ exports.sudoWebhook = onRequest(
       }
 
       // -- card.terminated -----------------------------------------------
-      // For this event, data has no .object � the card data is in payload.data directly.
+      // For this event, data has no .object ? the card data is in payload.data directly.
       if (eventType === "card.terminated") {
         const sudoCardId = eventData?._id;
         const currency = (eventData?.currency || "").toUpperCase();
@@ -12113,7 +13211,7 @@ exports.sudoWebhook = onRequest(
         return res.status(200).json({ ok: true });
       }
 
-      // Unknown event � ack receipt.
+      // Unknown event ? ack receipt.
       res.status(200).json({ ok: true, message: "Event received" });
     } catch (err) {
       console.error("[sudoWebhook] Error:", err);
@@ -12126,9 +13224,9 @@ exports.sudoWebhook = onRequest(
   },
 );
 
-// ==================== END SUDO AFRICA � CARDS ====================
+// ==================== END SUDO AFRICA ? CARDS ====================
 
-// -- Subscription Reminder � runs daily at 08:00 WAT (07:00 UTC) --------------
+// -- Subscription Reminder ? runs daily at 08:00 WAT (07:00 UTC) --------------
 exports.dailySubscriptionReminders = onSchedule(
   { schedule: "0 7 * * *", timeZone: "Africa/Lagos" },
   async () => {
@@ -12214,12 +13312,12 @@ exports.dailySubscriptionReminders = onSchedule(
 
         await doc.ref.update({ lastReminderSentAt: admin.firestore.Timestamp.now() });
         sent++;
-        console.log(`[dailySubscriptionReminders] Reminder sent � user:${userId} merchant:${merchantName}`);
+        console.log(`[dailySubscriptionReminders] Reminder sent ? user:${userId} merchant:${merchantName}`);
       } catch (docErr) {
         console.warn("[dailySubscriptionReminders] error processing sub:", doc.ref.path, docErr.message);
       }
     }
-    console.log(`[dailySubscriptionReminders] Done � ${sent} reminder(s) sent`);
+    console.log(`[dailySubscriptionReminders] Done ? ${sent} reminder(s) sent`);
   },
 );
 
@@ -12234,7 +13332,7 @@ exports.dailySubscriptionReminders = onSchedule(
 
 
 // ============================================================
-// SUPER AGENT � Banking Functions
+// SUPER AGENT ? Banking Functions
 // These callables authenticate via the superAgents collection
 // instead of ensureVerifiedOrStandUser (which requires email_verified).
 // ============================================================
@@ -12384,3 +13482,4 @@ exports.superAgentFetchBalance = onCall(
     return makeApiRequest({ url, method: "GET", secretKey });
   },
 );
+
