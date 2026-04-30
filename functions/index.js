@@ -34,7 +34,9 @@ const qoreIdClientId = defineSecret("QOREID_CLIENT_ID");
 const safehavenClientId = defineSecret("SAFEHAVEN_CLIENT_ID");
 const safehavenPrivateKey = defineSecret("SAFEHAVEN_PRIVATE_KEY"); // RS256 PEM private key
 const safehavenCompanyUrl = defineSecret("SAFEHAVEN_COMPANY_URL"); // e.g. https://yourcompany.com
-const safehavenDebitAccountNumber = defineSecret("SAFEHAVEN_DEBIT_ACCOUNT_NUMBER");
+const safehavenDebitAccountNumber = defineSecret(
+  "SAFEHAVEN_DEBIT_ACCOUNT_NUMBER",
+);
 // SafeHaven webhook secret removed: SafeHaven does not require HMAC verification
 // const safehavenWebhookSecret = defineSecret("SAFEHAVEN_WEBHOOK_SECRET");
 // Use sandbox URL for all Getanchor API calls
@@ -158,7 +160,11 @@ const validateData = (data, requiredFields) => {
 // -------------------------
 // Uses Firestore collection `rateLimits` with documents keyed by
 // `${scope}:${sha256(id)}`. Documents store { count, expiresAt }.
-const _rateLimitDocId = (scope, id) => `${scope}:${crypto.createHash("sha256").update(String(id || "")).digest("hex")}`;
+const _rateLimitDocId = (scope, id) =>
+  `${scope}:${crypto
+    .createHash("sha256")
+    .update(String(id || ""))
+    .digest("hex")}`;
 
 const _incrRateLimit = async (scope, id, limit, windowMs) => {
   if (!id) return 0;
@@ -217,10 +223,15 @@ const _getCallerIp = (req) => {
     const raw = req && (req.rawRequest || req.rawRequest);
     if (!raw) return null;
     const headers = raw.headers || {};
-    const forwarded = headers["x-forwarded-for"] || headers["x-client-ip"] || headers["x-appengine-user-ip"] || headers["x-real-ip"];
+    const forwarded =
+      headers["x-forwarded-for"] ||
+      headers["x-client-ip"] ||
+      headers["x-appengine-user-ip"] ||
+      headers["x-real-ip"];
     if (forwarded) return String(forwarded).split(",")[0].trim();
     if (raw.ip) return raw.ip;
-    if (raw.connection && raw.connection.remoteAddress) return raw.connection.remoteAddress;
+    if (raw.connection && raw.connection.remoteAddress)
+      return raw.connection.remoteAddress;
     return null;
   } catch (e) {
     return null;
@@ -260,7 +271,13 @@ const getPhoneLookupVariants = (value) => {
 
 const hashStorefrontPassword = (password, saltHex = null) => {
   const salt = saltHex ? Buffer.from(saltHex, "hex") : crypto.randomBytes(16);
-  const derived = crypto.pbkdf2Sync(String(password), salt, 120000, 64, "sha512");
+  const derived = crypto.pbkdf2Sync(
+    String(password),
+    salt,
+    120000,
+    64,
+    "sha512",
+  );
   return {
     salt: salt.toString("hex"),
     hash: derived.toString("hex"),
@@ -370,15 +387,15 @@ const getMerchantForStorefront = async (usernameInput) => {
   const userData = userSnap.data() || {};
   const businessData = businessSnap.exists ? businessSnap.data() || {} : {};
 
-  const fullName = `${String(userData.firstName || "").trim()} ${String(userData.lastName || "").trim()}`.trim();
-  const businessName =
-    String(
-      businessData.business_name ||
-        businessData.businessName ||
-        userData.businessName ||
-        fullName ||
-        username,
-    ).trim();
+  const fullName =
+    `${String(userData.firstName || "").trim()} ${String(userData.lastName || "").trim()}`.trim();
+  const businessName = String(
+    businessData.business_name ||
+      businessData.businessName ||
+      userData.businessName ||
+      fullName ||
+      username,
+  ).trim();
 
   const vaFromUser = userData.getAnchorData?.virtualAccount?.data;
   const vaFromBusiness = businessData.getAnchorData?.virtualAccount?.data;
@@ -405,7 +422,10 @@ const getMerchantForStorefront = async (usernameInput) => {
 
 const createStorefrontSession = async (customerId, phone, metadata = {}) => {
   const plainToken = crypto.randomBytes(32).toString("hex");
-  const tokenHash = crypto.createHash("sha256").update(plainToken).digest("hex");
+  const tokenHash = crypto
+    .createHash("sha256")
+    .update(plainToken)
+    .digest("hex");
   const now = Date.now();
   await db.collection("storefrontSessions").add({
     customerId,
@@ -477,7 +497,10 @@ const fulfillStorefrontOrder = async (orderId) => {
 
   const merchant = await getMerchantForStorefront(order.merchantUsername);
   if (!merchant.accountId) {
-    throw new HttpsError("failed-precondition", "Merchant account not configured.");
+    throw new HttpsError(
+      "failed-precondition",
+      "Merchant account not configured.",
+    );
   }
 
   const secretKey = getanchorSecretKey.value();
@@ -526,16 +549,24 @@ const fulfillStorefrontOrder = async (orderId) => {
     });
 
     const billData = billResp?.data || {};
-    const billStatus = String(billData?.attributes?.status || "pending").toUpperCase();
+    const billStatus = String(
+      billData?.attributes?.status || "pending",
+    ).toUpperCase();
 
-    const accepted = ["SUCCESSFUL", "COMPLETED", "PENDING", "PROCESSING", "IN_PROGRESS"].includes(
-      billStatus,
-    );
+    const accepted = [
+      "SUCCESSFUL",
+      "COMPLETED",
+      "PENDING",
+      "PROCESSING",
+      "IN_PROGRESS",
+    ].includes(billStatus);
 
     if (!accepted) {
       await orderRef.update({
         status: "failed",
-        failureReason: String(billData?.attributes?.failureReason || "Bill purchase failed"),
+        failureReason: String(
+          billData?.attributes?.failureReason || "Bill purchase failed",
+        ),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
       return { ok: false, status: "failed", reason: "Bill purchase failed" };
@@ -570,20 +601,29 @@ const fulfillStorefrontOrder = async (orderId) => {
       billStatus,
     };
   } catch (err) {
-    console.error(`[storefront] fulfillStorefrontOrder failed for ${orderId}:`, err);
+    console.error(
+      `[storefront] fulfillStorefrontOrder failed for ${orderId}:`,
+      err,
+    );
     await orderRef.update({
       status: "failed",
       failureReason: String(err?.message || "Order fulfillment failed"),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
-    return { ok: false, status: "failed", reason: String(err?.message || "Order fulfillment failed") };
+    return {
+      ok: false,
+      status: "failed",
+      reason: String(err?.message || "Order fulfillment failed"),
+    };
   }
 };
 
 const tryMatchAndSettleStorefrontOrder = async ({ merchantUid, payment }) => {
   try {
     const narration = String(payment?.narration || "").toLowerCase();
-    const paymentRef = String(payment?.paymentReference || payment?.paymentId || "").toLowerCase();
+    const paymentRef = String(
+      payment?.paymentReference || payment?.paymentId || "",
+    ).toLowerCase();
     const amountKobo = Number(payment?.amount || 0);
     if (!merchantUid || !amountKobo) return;
 
@@ -602,9 +642,14 @@ const tryMatchAndSettleStorefrontOrder = async ({ merchantUid, payment }) => {
       const order = doc.data() || {};
       const expectedRef = String(order.expectedReference || "").toLowerCase();
       const expectedAmount = Number(order.amountKobo || 0);
-      const refMatched = expectedRef && (narration.includes(expectedRef) || paymentRef.includes(expectedRef));
+      const refMatched =
+        expectedRef &&
+        (narration.includes(expectedRef) || paymentRef.includes(expectedRef));
       const amountMatched = expectedAmount > 0 && expectedAmount === amountKobo;
-      if (refMatched || (amountMatched && expectedRef && expectedRef.length >= 6)) {
+      if (
+        refMatched ||
+        (amountMatched && expectedRef && expectedRef.length >= 6)
+      ) {
         matchedDoc = doc;
         break;
       }
@@ -642,15 +687,31 @@ exports.storefrontGetMerchant = onCall(async (request) => {
   const ip = _getCallerIp(request);
   try {
     if (normalized) {
-      const nameCount = await _incrRateLimit("storefront:getmerchant:username", normalized, GET_USERNAME_LIMIT, GET_USERNAME_WINDOW);
+      const nameCount = await _incrRateLimit(
+        "storefront:getmerchant:username",
+        normalized,
+        GET_USERNAME_LIMIT,
+        GET_USERNAME_WINDOW,
+      );
       if (nameCount > GET_USERNAME_LIMIT) {
-        throw new HttpsError("resource-exhausted", "Too many requests for this merchant. Try again later.");
+        throw new HttpsError(
+          "resource-exhausted",
+          "Too many requests for this merchant. Try again later.",
+        );
       }
     }
     if (ip) {
-      const ipCount = await _incrRateLimit("storefront:getmerchant:ip", ip, GET_IP_LIMIT, GET_IP_WINDOW);
+      const ipCount = await _incrRateLimit(
+        "storefront:getmerchant:ip",
+        ip,
+        GET_IP_LIMIT,
+        GET_IP_WINDOW,
+      );
       if (ipCount > GET_IP_LIMIT) {
-        throw new HttpsError("resource-exhausted", "Too many requests from this IP. Try again later.");
+        throw new HttpsError(
+          "resource-exhausted",
+          "Too many requests from this IP. Try again later.",
+        );
       }
     }
   } catch (err) {
@@ -694,9 +755,14 @@ exports.storefrontListDataBillers = onCall(
           ? payload.data
           : [];
 
-      console.log(`[storefront] storefrontListDataBillers loaded ${billers.length} data billers`);
+      console.log(
+        `[storefront] storefrontListDataBillers loaded ${billers.length} data billers`,
+      );
       if (billers.length === 0) {
-        console.warn("[storefront] storefrontListDataBillers returned 0 billers", payload);
+        console.warn(
+          "[storefront] storefrontListDataBillers returned 0 billers",
+          payload,
+        );
       }
 
       return { billers };
@@ -735,12 +801,17 @@ exports.storefrontListDataProducts = onCall(
           ? payload.data
           : [];
 
-      console.log(`[storefront] storefrontListDataProducts loaded ${products.length} products for biller ${cleanBillerId}`);
+      console.log(
+        `[storefront] storefrontListDataProducts loaded ${products.length} products for biller ${cleanBillerId}`,
+      );
       if (products.length === 0) {
-        console.warn("[storefront] storefrontListDataProducts returned 0 products", {
-          billerId: cleanBillerId,
-          payload,
-        });
+        console.warn(
+          "[storefront] storefrontListDataProducts returned 0 products",
+          {
+            billerId: cleanBillerId,
+            payload,
+          },
+        );
       }
 
       return { products };
@@ -761,10 +832,16 @@ exports.storefrontCreateAccount = onCall(async (request) => {
   const cleanName = String(fullName || "").trim();
 
   if (!normalizedPhone || normalizedPhone.length < 13) {
-    throw new HttpsError("invalid-argument", "A valid phone number is required.");
+    throw new HttpsError(
+      "invalid-argument",
+      "A valid phone number is required.",
+    );
   }
   if (cleanPassword.length < 6) {
-    throw new HttpsError("invalid-argument", "Password must be at least 6 characters.");
+    throw new HttpsError(
+      "invalid-argument",
+      "Password must be at least 6 characters.",
+    );
   }
 
   // Rate limit signup attempts by phone and by IP
@@ -773,15 +850,31 @@ exports.storefrontCreateAccount = onCall(async (request) => {
   const SIGNUP_IP_LIMIT = 20;
   const SIGNUP_IP_WINDOW = 60 * 60 * 1000; // 1 hour
   try {
-    const phoneCount = await _incrRateLimit("storefront:signup:phone", normalizedPhone, SIGNUP_PHONE_LIMIT, SIGNUP_PHONE_WINDOW);
+    const phoneCount = await _incrRateLimit(
+      "storefront:signup:phone",
+      normalizedPhone,
+      SIGNUP_PHONE_LIMIT,
+      SIGNUP_PHONE_WINDOW,
+    );
     if (phoneCount > SIGNUP_PHONE_LIMIT) {
-      throw new HttpsError("resource-exhausted", "Too many signup attempts for this phone. Try again later.");
+      throw new HttpsError(
+        "resource-exhausted",
+        "Too many signup attempts for this phone. Try again later.",
+      );
     }
     const ip = _getCallerIp(request);
     if (ip) {
-      const ipCount = await _incrRateLimit("storefront:signup:ip", ip, SIGNUP_IP_LIMIT, SIGNUP_IP_WINDOW);
+      const ipCount = await _incrRateLimit(
+        "storefront:signup:ip",
+        ip,
+        SIGNUP_IP_LIMIT,
+        SIGNUP_IP_WINDOW,
+      );
       if (ipCount > SIGNUP_IP_LIMIT) {
-        throw new HttpsError("resource-exhausted", "Too many signup attempts from this IP. Try again later.");
+        throw new HttpsError(
+          "resource-exhausted",
+          "Too many signup attempts from this IP. Try again later.",
+        );
       }
     }
   } catch (err) {
@@ -797,7 +890,10 @@ exports.storefrontCreateAccount = onCall(async (request) => {
     .get();
 
   if (!existing.empty) {
-    throw new HttpsError("already-exists", "An account already exists for this phone number.");
+    throw new HttpsError(
+      "already-exists",
+      "An account already exists for this phone number.",
+    );
   }
 
   const { salt, hash } = hashStorefrontPassword(cleanPassword);
@@ -811,9 +907,13 @@ exports.storefrontCreateAccount = onCall(async (request) => {
     status: "active",
   });
 
-  const sessionToken = await createStorefrontSession(docRef.id, normalizedPhone, {
-    reason: "signup",
-  });
+  const sessionToken = await createStorefrontSession(
+    docRef.id,
+    normalizedPhone,
+    {
+      reason: "signup",
+    },
+  );
 
   return {
     customerId: docRef.id,
@@ -829,7 +929,10 @@ exports.storefrontLogin = onCall(async (request) => {
   const cleanPassword = String(password || "");
 
   if (!normalizedPhone || !cleanPassword) {
-    throw new HttpsError("invalid-argument", "Phone and password are required.");
+    throw new HttpsError(
+      "invalid-argument",
+      "Phone and password are required.",
+    );
   }
 
   // Rate limit failed login attempts (pre-check)
@@ -838,12 +941,20 @@ exports.storefrontLogin = onCall(async (request) => {
   const callerIp = _getCallerIp(request);
   try {
     if (normalizedPhone) {
-      const blockRef = db.collection("rateLimits").doc(_rateLimitDocId("storefront:login:fail:phone", normalizedPhone));
+      const blockRef = db
+        .collection("rateLimits")
+        .doc(_rateLimitDocId("storefront:login:fail:phone", normalizedPhone));
       const blockSnap = await blockRef.get();
       if (blockSnap.exists) {
         const data = blockSnap.data() || {};
-        if (Date.now() <= Number(data.expiresAt || 0) && Number(data.count || 0) >= LOGIN_FAIL_LIMIT) {
-          throw new HttpsError("resource-exhausted", "Too many failed login attempts for this account. Try again later.");
+        if (
+          Date.now() <= Number(data.expiresAt || 0) &&
+          Number(data.count || 0) >= LOGIN_FAIL_LIMIT
+        ) {
+          throw new HttpsError(
+            "resource-exhausted",
+            "Too many failed login attempts for this account. Try again later.",
+          );
         }
       }
     }
@@ -863,9 +974,17 @@ exports.storefrontLogin = onCall(async (request) => {
     // Unknown phone - increment IP-based failure counter to slow down enumeration
     try {
       if (callerIp) {
-        const ipCount = await _incrRateLimit("storefront:login:fail:ip", callerIp, 100, 60 * 60 * 1000);
+        const ipCount = await _incrRateLimit(
+          "storefront:login:fail:ip",
+          callerIp,
+          100,
+          60 * 60 * 1000,
+        );
         if (ipCount > 100) {
-          throw new HttpsError("resource-exhausted", "Too many login attempts from this IP. Try again later.");
+          throw new HttpsError(
+            "resource-exhausted",
+            "Too many login attempts from this IP. Try again later.",
+          );
         }
       }
     } catch (err) {
@@ -885,10 +1004,24 @@ exports.storefrontLogin = onCall(async (request) => {
 
   if (!ok) {
     try {
-      const phoneCount = await _incrRateLimit("storefront:login:fail:phone", normalizedPhone, LOGIN_FAIL_LIMIT, LOGIN_FAIL_WINDOW);
-      if (callerIp) await _incrRateLimit("storefront:login:fail:ip", callerIp, 100, 60 * 60 * 1000);
+      const phoneCount = await _incrRateLimit(
+        "storefront:login:fail:phone",
+        normalizedPhone,
+        LOGIN_FAIL_LIMIT,
+        LOGIN_FAIL_WINDOW,
+      );
+      if (callerIp)
+        await _incrRateLimit(
+          "storefront:login:fail:ip",
+          callerIp,
+          100,
+          60 * 60 * 1000,
+        );
       if (phoneCount > LOGIN_FAIL_LIMIT) {
-        throw new HttpsError("resource-exhausted", "Too many failed login attempts for this account. Try again later.");
+        throw new HttpsError(
+          "resource-exhausted",
+          "Too many failed login attempts for this account. Try again later.",
+        );
       }
     } catch (err) {
       if (err instanceof HttpsError) throw err;
@@ -936,14 +1069,30 @@ exports.storefrontRequestPasswordReset = onCall(async (request) => {
   const RESET_IP_WINDOW = 60 * 60 * 1000; // 1 hour
   const reqIp = _getCallerIp(request);
   try {
-    const phoneCount = await _incrRateLimit("storefront:password_reset:phone", normalizedPhone, RESET_PHONE_LIMIT, RESET_PHONE_WINDOW);
+    const phoneCount = await _incrRateLimit(
+      "storefront:password_reset:phone",
+      normalizedPhone,
+      RESET_PHONE_LIMIT,
+      RESET_PHONE_WINDOW,
+    );
     if (phoneCount > RESET_PHONE_LIMIT) {
-      throw new HttpsError("resource-exhausted", "Too many password reset requests for this phone. Try again later.");
+      throw new HttpsError(
+        "resource-exhausted",
+        "Too many password reset requests for this phone. Try again later.",
+      );
     }
     if (reqIp) {
-      const ipCount = await _incrRateLimit("storefront:password_reset:ip", reqIp, RESET_IP_LIMIT, RESET_IP_WINDOW);
+      const ipCount = await _incrRateLimit(
+        "storefront:password_reset:ip",
+        reqIp,
+        RESET_IP_LIMIT,
+        RESET_IP_WINDOW,
+      );
       if (ipCount > RESET_IP_LIMIT) {
-        throw new HttpsError("resource-exhausted", "Too many requests from this IP. Try again later.");
+        throw new HttpsError(
+          "resource-exhausted",
+          "Too many requests from this IP. Try again later.",
+        );
       }
     }
   } catch (err) {
@@ -988,10 +1137,16 @@ exports.storefrontResetPassword = onCall(async (request) => {
   const cleanPassword = String(newPassword || "");
 
   if (!normalizedPhone || !cleanOtp || !cleanPassword) {
-    throw new HttpsError("invalid-argument", "Phone, OTP, and new password are required.");
+    throw new HttpsError(
+      "invalid-argument",
+      "Phone, OTP, and new password are required.",
+    );
   }
   if (cleanPassword.length < 6) {
-    throw new HttpsError("invalid-argument", "Password must be at least 6 characters.");
+    throw new HttpsError(
+      "invalid-argument",
+      "Password must be at least 6 characters.",
+    );
   }
 
   // Rate limit OTP verification attempts to prevent brute-force
@@ -999,12 +1154,25 @@ exports.storefrontResetPassword = onCall(async (request) => {
   const RESET_VERIFY_WINDOW = 60 * 60 * 1000; // 1 hour
   const verifyIp = _getCallerIp(request);
   try {
-    const verifyCount = await _incrRateLimit("storefront:password_reset_verify:phone", normalizedPhone, RESET_VERIFY_LIMIT, RESET_VERIFY_WINDOW);
+    const verifyCount = await _incrRateLimit(
+      "storefront:password_reset_verify:phone",
+      normalizedPhone,
+      RESET_VERIFY_LIMIT,
+      RESET_VERIFY_WINDOW,
+    );
     if (verifyCount > RESET_VERIFY_LIMIT) {
-      throw new HttpsError("resource-exhausted", "Too many OTP verification attempts. Try again later.");
+      throw new HttpsError(
+        "resource-exhausted",
+        "Too many OTP verification attempts. Try again later.",
+      );
     }
     if (verifyIp) {
-      await _incrRateLimit("storefront:password_reset_verify:ip", verifyIp, 200, RESET_VERIFY_WINDOW);
+      await _incrRateLimit(
+        "storefront:password_reset_verify:ip",
+        verifyIp,
+        200,
+        RESET_VERIFY_WINDOW,
+      );
     }
   } catch (err) {
     if (err instanceof HttpsError) throw err;
@@ -1035,7 +1203,9 @@ exports.storefrontResetPassword = onCall(async (request) => {
     throw new HttpsError("permission-denied", "Invalid or expired OTP.");
   }
 
-  const customerRef = db.collection("storefrontCustomers").doc(String(resetData.customerId || ""));
+  const customerRef = db
+    .collection("storefrontCustomers")
+    .doc(String(resetData.customerId || ""));
   const customerSnap = await customerRef.get();
   if (!customerSnap.exists) {
     throw new HttpsError("not-found", "Customer account not found.");
@@ -1056,11 +1226,18 @@ exports.storefrontResetPassword = onCall(async (request) => {
 
   // Reset OTP/rate-limit counters on successful password reset
   try {
-    await _resetRateLimit("storefront:password_reset_verify:phone", normalizedPhone);
+    await _resetRateLimit(
+      "storefront:password_reset_verify:phone",
+      normalizedPhone,
+    );
     const resetIp = _getCallerIp(request);
-    if (resetIp) await _resetRateLimit("storefront:password_reset_verify:ip", resetIp);
+    if (resetIp)
+      await _resetRateLimit("storefront:password_reset_verify:ip", resetIp);
   } catch (err) {
-    console.error("[rateLimit] reset counters after password reset failed:", err);
+    console.error(
+      "[rateLimit] reset counters after password reset failed:",
+      err,
+    );
   }
 
   return { reset: true };
@@ -1080,12 +1257,18 @@ exports.storefrontCreateTransferOrder = onCall(async (request) => {
   const merchant = await getMerchantForStorefront(merchantUsername);
 
   if (!merchant.accountNumber || !merchant.bankName) {
-    throw new HttpsError("failed-precondition", "Merchant account details are unavailable.");
+    throw new HttpsError(
+      "failed-precondition",
+      "Merchant account details are unavailable.",
+    );
   }
 
   const amount = Number(amountKobo || 0);
   if (!Number.isFinite(amount) || amount <= 0) {
-    throw new HttpsError("invalid-argument", "amountKobo must be a positive number.");
+    throw new HttpsError(
+      "invalid-argument",
+      "amountKobo must be a positive number.",
+    );
   }
 
   const expectedReference = `PP${Date.now().toString(36).toUpperCase()}${Math.floor(
@@ -1138,7 +1321,10 @@ exports.storefrontPayWithPadipay = onCall(
     const session = await getStorefrontSession(sessionToken);
     const merchant = await getMerchantForStorefront(merchantUsername);
     if (!merchant.accountId) {
-      throw new HttpsError("failed-precondition", "Merchant account is unavailable.");
+      throw new HttpsError(
+        "failed-precondition",
+        "Merchant account is unavailable.",
+      );
     }
 
     const phoneVariants = getPhoneLookupVariants(buyerPhone);
@@ -1176,17 +1362,25 @@ exports.storefrontPayWithPadipay = onCall(
       throw new HttpsError("permission-denied", "Invalid transaction PIN.");
     }
 
-    const fromAccountId = String(buyerData.getAnchorData?.virtualAccount?.data?.id || "").trim();
+    const fromAccountId = String(
+      buyerData.getAnchorData?.virtualAccount?.data?.id || "",
+    ).trim();
     const fromAccountType = String(
       buyerData.getAnchorData?.virtualAccount?.data?.type || "DepositAccount",
     ).trim();
     if (!fromAccountId) {
-      throw new HttpsError("failed-precondition", "Buyer account is unavailable.");
+      throw new HttpsError(
+        "failed-precondition",
+        "Buyer account is unavailable.",
+      );
     }
 
     const amount = Number(amountKobo || 0);
     if (!Number.isFinite(amount) || amount <= 0) {
-      throw new HttpsError("invalid-argument", "amountKobo must be a positive number.");
+      throw new HttpsError(
+        "invalid-argument",
+        "amountKobo must be a positive number.",
+      );
     }
 
     const secretKey = getanchorSecretKey.value();
@@ -1250,7 +1444,9 @@ exports.storefrontPayWithPadipay = onCall(
 
       await orderRef.update({
         transferId: String(transferResp?.data?.id || ""),
-        transferStatus: String(transferResp?.data?.attributes?.status || "").toUpperCase(),
+        transferStatus: String(
+          transferResp?.data?.attributes?.status || "",
+        ).toUpperCase(),
         paidAt: admin.firestore.FieldValue.serverTimestamp(),
         status: "paid",
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -1261,7 +1457,9 @@ exports.storefrontPayWithPadipay = onCall(
         type: "storefront_payment",
         amountNaira: amount / 100,
         reference: String(transferResp?.data?.id || transferReference),
-        status: String(transferResp?.data?.attributes?.status || "pending").toLowerCase(),
+        status: String(
+          transferResp?.data?.attributes?.status || "pending",
+        ).toLowerCase(),
         extra: {
           receiverId: merchant.uid,
           source: "storefront",
@@ -1298,13 +1496,19 @@ exports.storefrontGetOrder = onCall(async (request) => {
     throw new HttpsError("invalid-argument", "orderId is required.");
   }
 
-  const orderSnap = await db.collection("storefrontOrders").doc(String(orderId)).get();
+  const orderSnap = await db
+    .collection("storefrontOrders")
+    .doc(String(orderId))
+    .get();
   if (!orderSnap.exists) {
     throw new HttpsError("not-found", "Order not found.");
   }
   const order = orderSnap.data() || {};
   if (String(order.customerId || "") !== String(session.customerId || "")) {
-    throw new HttpsError("permission-denied", "You do not have access to this order.");
+    throw new HttpsError(
+      "permission-denied",
+      "You do not have access to this order.",
+    );
   }
 
   return {
@@ -1347,13 +1551,19 @@ const _getQoreIdToken = async () => {
   if (!res.ok) {
     const body = await res.text().catch(() => "(unreadable)");
     console.error(`QoreID token request failed ${res.status}: ${body}`);
-    throw new HttpsError("internal", `QoreID token request failed: ${res.status}`);
+    throw new HttpsError(
+      "internal",
+      `QoreID token request failed: ${res.status}`,
+    );
   }
 
   const json = await res.json();
   const token = json?.accessToken ?? json?.token ?? json?.access_token;
   if (!token) {
-    throw new HttpsError("internal", "QoreID token response did not contain a token");
+    throw new HttpsError(
+      "internal",
+      "QoreID token response did not contain a token",
+    );
   }
 
   // Cache for ~50 minutes (tokens are typically valid for 1 hour)
@@ -1371,7 +1581,10 @@ exports.verifyBvnNoFace = onCall(
       throw new HttpsError("invalid-argument", "BVN must be 11 digits");
     }
     if (!firstName || !lastName) {
-      throw new HttpsError("invalid-argument", "First and last name are required");
+      throw new HttpsError(
+        "invalid-argument",
+        "First and last name are required",
+      );
     }
 
     // Run auth check and token fetch in parallel ? they're independent
@@ -1396,13 +1609,25 @@ exports.verifyBvnNoFace = onCall(
       const errBody = await response.text().catch(() => "(unreadable)");
       console.error(`QoreID ${response.status} for BVN ${bvn}: ${errBody}`);
       // If 401, invalidate cached token so next call re-fetches
-      if (response.status === 401) { _qoreIdToken = null; _qoreIdTokenExpiresAt = 0; }
-      throw new HttpsError("internal", `QoreID request failed: ${response.status}`);
+      if (response.status === 401) {
+        _qoreIdToken = null;
+        _qoreIdTokenExpiresAt = 0;
+      }
+      throw new HttpsError(
+        "internal",
+        `QoreID request failed: ${response.status}`,
+      );
     }
 
     const json = await response.json();
-    const jsonForLog = { ...json, bvn: json.bvn ? { ...json.bvn, photo: "[omitted]" } : json.bvn };
-    console.log(`QoreID BVN response for ${bvn}:`, JSON.stringify(jsonForLog, null, 2));
+    const jsonForLog = {
+      ...json,
+      bvn: json.bvn ? { ...json.bvn, photo: "[omitted]" } : json.bvn,
+    };
+    console.log(
+      `QoreID BVN response for ${bvn}:`,
+      JSON.stringify(jsonForLog, null, 2),
+    );
 
     const status = json?.summary?.bvn_check?.status ?? "NO_MATCH";
     const fieldMatches = json?.summary?.bvn_check?.fieldMatches ?? {};
@@ -1423,19 +1648,22 @@ exports.verifyBvnNoFace = onCall(
     // Fire-and-forget Firestore write ? don't block the response on it
     const uid = data.auth?.uid;
     if (uid) {
-      db.collection("users").doc(uid).update({
-        "qoreIdData.bvnVerificationNoFace": {
-          verified: isMatch,
-          status,
-          fieldMatches,
-          ...bvnData,
-          verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
-        },
-      }).catch((err) => console.error("BVN Firestore write failed:", err));
+      db.collection("users")
+        .doc(uid)
+        .update({
+          "qoreIdData.bvnVerificationNoFace": {
+            verified: isMatch,
+            status,
+            fieldMatches,
+            ...bvnData,
+            verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+        })
+        .catch((err) => console.error("BVN Firestore write failed:", err));
     }
 
     return { verified: isMatch, status, fieldMatches, bvnData };
-  }
+  },
 );
 // Ensure caller is either email-verified or present in standUsers
 const ensureVerifiedOrStandUser = async (auth) => {
@@ -1508,7 +1736,9 @@ const getSuperAgentProgramSettings = async () => {
 const computeSuperAgentStars = (totalEarnings, starThresholds) => {
   let stars = 0;
   for (let i = 1; i <= 5; i++) {
-    const threshold = Number(starThresholds?.[i] ?? starThresholds?.[String(i)] ?? 0);
+    const threshold = Number(
+      starThresholds?.[i] ?? starThresholds?.[String(i)] ?? 0,
+    );
     if (totalEarnings >= threshold) {
       stars = i;
     }
@@ -1522,7 +1752,10 @@ const requireAdminCaller = async (request) => {
   }
   const callerDoc = await db.collection("admins").doc(request.auth.uid).get();
   if (!callerDoc.exists || callerDoc.data()?.role !== "admin") {
-    throw new HttpsError("permission-denied", "Only admins can perform this action.");
+    throw new HttpsError(
+      "permission-denied",
+      "Only admins can perform this action.",
+    );
   }
   return request.auth.uid;
 };
@@ -1554,7 +1787,10 @@ const generateBusinessSuperAgentCode = async () => {
 
     return candidate;
   }
-  throw new HttpsError("internal", "Could not generate a unique super-agent referral code.");
+  throw new HttpsError(
+    "internal",
+    "Could not generate a unique super-agent referral code.",
+  );
 };
 
 // Runtime key override: set appConfig/anchor { secretKeyOverride: "test_key" } in Firestore
@@ -1573,12 +1809,17 @@ const _isAnchorLegacyEnabled = async () => {
 
   try {
     const doc = await db.collection("appConfig").doc("anchor").get();
-    const legacyEnabled = Boolean(doc.exists && doc.data()?.legacyEnabled === true);
+    const legacyEnabled = Boolean(
+      doc.exists && doc.data()?.legacyEnabled === true,
+    );
     _anchorLegacyEnabledCache = legacyEnabled;
     _anchorLegacyEnabledFetchedAt = now;
     return legacyEnabled;
   } catch (e) {
-    console.warn("Failed to read anchor legacyEnabled flag. Defaulting to disabled:", e.message);
+    console.warn(
+      "Failed to read anchor legacyEnabled flag. Defaulting to disabled:",
+      e.message,
+    );
     _anchorLegacyEnabledCache = false;
     _anchorLegacyEnabledFetchedAt = now;
     return false;
@@ -1605,14 +1846,17 @@ const _resolveAnchorKey = async (fallback) => {
   }
   try {
     const doc = await db.collection("appConfig").doc("anchor").get();
-    const override = doc.exists ? (doc.data().secretKeyOverride || "") : "";
+    const override = doc.exists ? doc.data().secretKeyOverride || "" : "";
     _anchorKeyOverrideCache = override;
     _anchorKeyOverrideFetchedAt = now;
     const key = override || fallback;
     const baseUrl = override ? SANDBOX_BASE_URL : BASE_URL;
     return { key, baseUrl };
   } catch (e) {
-    console.warn("Failed to read anchor key override from Firestore, using secret:", e.message);
+    console.warn(
+      "Failed to read anchor key override from Firestore, using secret:",
+      e.message,
+    );
     return { key: fallback, baseUrl: BASE_URL };
   }
 };
@@ -1627,7 +1871,8 @@ const makeApiRequest = async ({
 }) => {
   await _assertAnchorLegacyEnabled();
 
-  const { key: resolvedKey, baseUrl: resolvedBaseUrl } = await _resolveAnchorKey(secretKey);
+  const { key: resolvedKey, baseUrl: resolvedBaseUrl } =
+    await _resolveAnchorKey(secretKey);
   // Support absolute URLs and relative endpoint paths (e.g. "/bills").
   const normalizedUrl = String(url || "").trim();
   if (!normalizedUrl) {
@@ -1733,13 +1978,18 @@ const _resolveSafehavenConfig = async () => {
   const companyUrl = safehavenCompanyUrl.value();
 
   if (!prodClientId || !privateKeyPem || !companyUrl) {
-    throw new HttpsError("internal", "Safe Haven credentials are not configured");
+    throw new HttpsError(
+      "internal",
+      "Safe Haven credentials are not configured",
+    );
   }
 
   let sandboxClientId = "";
   try {
     const doc = await db.collection("appConfig").doc("safehaven").get();
-    sandboxClientId = doc.exists ? String(doc.data()?.sandboxClientId || "").trim() : "";
+    sandboxClientId = doc.exists
+      ? String(doc.data()?.sandboxClientId || "").trim()
+      : "";
   } catch (e) {
     console.warn(
       "Failed to read Safehaven sandbox client id from Firestore, using prod:",
@@ -1751,7 +2001,9 @@ const _resolveSafehavenConfig = async () => {
     clientId: sandboxClientId || prodClientId,
     privateKeyPem,
     companyUrl,
-    baseUrl: sandboxClientId ? SAFEHAVEN_SANDBOX_BASE_URL : SAFEHAVEN_PROD_BASE_URL,
+    baseUrl: sandboxClientId
+      ? SAFEHAVEN_SANDBOX_BASE_URL
+      : SAFEHAVEN_PROD_BASE_URL,
     mode: sandboxClientId ? "sandbox" : "prod",
   };
 
@@ -1764,7 +2016,9 @@ const _getSafehavenDebitAccountConfig = async () => {
   const config = await _resolveSafehavenConfig();
 
   if (config.mode === "prod") {
-    const prodDebitAccount = String(safehavenDebitAccountNumber.value() || "").trim();
+    const prodDebitAccount = String(
+      safehavenDebitAccountNumber.value() || "",
+    ).trim();
     return {
       mode: config.mode,
       source: prodDebitAccount ? "secret" : "none",
@@ -1774,10 +2028,14 @@ const _getSafehavenDebitAccountConfig = async () => {
 
   try {
     const doc = await db.collection("appConfig").doc("safehaven").get();
-    const sandboxDebitAccountNumber = doc.exists ? String(doc.data()?.sandboxDebitAccountNumber || "").trim() : "";
+    const sandboxDebitAccountNumber = doc.exists
+      ? String(doc.data()?.sandboxDebitAccountNumber || "").trim()
+      : "";
     return {
       mode: config.mode,
-      source: sandboxDebitAccountNumber ? "appConfig.safehaven.sandboxDebitAccountNumber" : "sandbox-default",
+      source: sandboxDebitAccountNumber
+        ? "appConfig.safehaven.sandboxDebitAccountNumber"
+        : "sandbox-default",
       debitAccountNumber: sandboxDebitAccountNumber || "0104610514",
     };
   } catch (e) {
@@ -1844,7 +2102,8 @@ const _getSafehavenToken = async () => {
   );
   const params = new URLSearchParams({
     grant_type: "client_credentials",
-    client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+    client_assertion_type:
+      "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
     client_assertion: clientAssertion,
     client_id: config.clientId,
   });
@@ -1878,22 +2137,37 @@ const _getSafehavenToken = async () => {
     _safehavenTokenCache = null;
     _safehavenTokenCacheKey = null;
     _safehavenTokenExpiresAt = 0;
-    throw new HttpsError("internal", `SafeHaven OAuth failed (${response.status}): ${text}`);
+    throw new HttpsError(
+      "internal",
+      `SafeHaven OAuth failed (${response.status}): ${text}`,
+    );
   }
   let json;
   try {
     json = JSON.parse(text);
   } catch (e) {
-    console.error('[SafeHaven] token parse error', { status: response.status, body: text });
-    throw new HttpsError('internal', `SafeHaven OAuth parse error: ${e.message}`);
+    console.error("[SafeHaven] token parse error", {
+      status: response.status,
+      body: text,
+    });
+    throw new HttpsError(
+      "internal",
+      `SafeHaven OAuth parse error: ${e.message}`,
+    );
   }
 
   if (!json || !json.access_token) {
-    console.error('[SafeHaven] token error (no access_token)', { status: response.status, body: text });
+    console.error("[SafeHaven] token error (no access_token)", {
+      status: response.status,
+      body: text,
+    });
     _safehavenTokenCache = null;
     _safehavenTokenCacheKey = null;
     _safehavenTokenExpiresAt = 0;
-    throw new HttpsError('internal', `SafeHaven OAuth failed (${response.status}): ${text}`);
+    throw new HttpsError(
+      "internal",
+      `SafeHaven OAuth failed (${response.status}): ${text}`,
+    );
   }
 
   _safehavenTokenCache = json.access_token;
@@ -1932,12 +2206,22 @@ const safehavenRequest = async ({ path, method = "GET", body = null }) => {
   const text = await response.text();
   console.log(`[SafeHaven] ${response.status} ${url}:`, text.slice(0, 600));
   if (!response.ok) {
-    throw new HttpsError("internal", `SafeHaven API ${response.status}: ${text.slice(0, 300)}`);
+    throw new HttpsError(
+      "internal",
+      `SafeHaven API ${response.status}: ${text.slice(0, 300)}`,
+    );
   }
   const parsed = JSON.parse(text);
   // SafeHaven sometimes returns HTTP 2xx with an error statusCode in the body
-  if (parsed && typeof parsed.statusCode === "number" && parsed.statusCode >= 400) {
-    throw new HttpsError("internal", `SafeHaven API ${parsed.statusCode}: ${text.slice(0, 300)}`);
+  if (
+    parsed &&
+    typeof parsed.statusCode === "number" &&
+    parsed.statusCode >= 400
+  ) {
+    throw new HttpsError(
+      "internal",
+      `SafeHaven API ${parsed.statusCode}: ${text.slice(0, 300)}`,
+    );
   }
   return parsed;
 };
@@ -1946,7 +2230,8 @@ const safehavenRequest = async ({ path, method = "GET", body = null }) => {
 // traced quickly in Cloud Functions logs.
 const onCallLogged = (functionName, options, handler) =>
   onCall(options, async (data, context) => {
-    const payload = data?.data && typeof data.data === "object" ? data.data : {};
+    const payload =
+      data?.data && typeof data.data === "object" ? data.data : {};
     const traceId =
       payload?.idempotencyKey ||
       payload?.reference ||
@@ -1980,7 +2265,10 @@ const onCallLogged = (functionName, options, handler) =>
 const _getSafehavenAccountForUser = async (uid) => {
   const snap = await db.collection("users").doc(uid).get();
   if (!snap.exists) return null;
-  const va = snap.data()?.getAnchorData?.virtualAccount?.data;
+  const userData = snap.data() || {};
+  const va =
+    userData?.getAnchorData?.virtualAccount?.data ||
+    userData?.safehavenData?.virtualAccount?.data;
   if (!va) return null;
   return {
     accountId: va.id || "",
@@ -2002,19 +2290,124 @@ const _safehavenNameEnquiry = async (uid, bankCode, accountNumber) => {
       accountNumber: String(accountNumber || "").trim(),
     },
   });
+  const raw = resp.data || {};
+  const payload = raw?.data || raw;
+  const resolvedReference =
+    payload?.nameEnquiryReference ||
+    payload?.nameEnquiryId ||
+    payload?.sessionId ||
+    "";
+  const normalized = {
+    ...payload,
+    nameEnquiryReference: resolvedReference,
+    accountName: payload?.accountName || payload?.beneficiaryAccountName || "",
+  };
+
+  console.log("[_safehavenNameEnquiry] normalized", {
+    bankCode,
+    accountNumber,
+    responseCode: raw?.responseCode || payload?.responseCode || "",
+    hasReference: Boolean(resolvedReference),
+  });
+
   // Cache the name enquiry reference
-  if (uid && resp.data?.nameEnquiryReference) {
-    const cacheKey = crypto.createHash("sha256").update(`${bankCode}:${accountNumber}`).digest("hex");
-    await db.collection("safehavenNameEnquiryCache").doc(`${uid}_${cacheKey}`).set({
-      nameEnquiryReference: resp.data.nameEnquiryReference,
-      bankCode,
-      accountNumber,
-      accountName: resp.data.accountName || resp.data.beneficiaryAccountName || "",
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      expiresAtMs: Date.now() + 5 * 60 * 1000,
-    });
+  if (uid && resolvedReference) {
+    const cacheKey = crypto
+      .createHash("sha256")
+      .update(`${bankCode}:${accountNumber}`)
+      .digest("hex");
+    await db
+      .collection("safehavenNameEnquiryCache")
+      .doc(`${uid}_${cacheKey}`)
+      .set({
+        nameEnquiryReference: resolvedReference,
+        bankCode,
+        accountNumber,
+        accountName: normalized.accountName,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        expiresAtMs: Date.now() + 5 * 60 * 1000,
+      });
   }
-  return resp.data || {};
+  return normalized;
+};
+
+const _looksLikeLegacyAnchorId = (value) => {
+  const v = String(value || "").toLowerCase();
+  return v.includes("anc_acc") || v.includes("anc_bk") || v.includes("anchor");
+};
+
+const _looksLikeTenDigitAccountNumber = (value) =>
+  /^\d{10}$/.test(String(value || "").trim());
+
+const _isNumericBankCode = (value) =>
+  /^\d{6}$/.test(String(value || "").trim());
+
+const _safehavenListMainAccounts = async () => {
+  const resp = await safehavenRequest({
+    path: "/accounts?page=0&limit=100&isSubAccount=false",
+    method: "GET",
+  });
+  const rows = Array.isArray(resp?.data) ? resp.data : [];
+  return rows.map((r) => ({
+    id: String(r?._id || "").trim(),
+    accountNumber: String(r?.accountNumber || "").trim(),
+    accountName: String(r?.accountName || "").trim(),
+    isDefault: Boolean(r?.isDefault),
+    isSubAccount: Boolean(r?.isSubAccount),
+    status: String(r?.status || "").trim(),
+  }));
+};
+
+const _resolveIntraDestination = async ({ toAccountId, toBankCode }) => {
+  const rawTo = String(toAccountId || "").trim();
+  const rawBank = String(toBankCode || "").trim();
+
+  const normalizedBank =
+    rawBank === "090286" ||
+    _looksLikeLegacyAnchorId(rawBank) ||
+    !_isNumericBankCode(rawBank)
+      ? "999240"
+      : rawBank;
+
+  if (
+    _looksLikeTenDigitAccountNumber(rawTo) &&
+    !_looksLikeLegacyAnchorId(rawTo)
+  ) {
+    return {
+      toAccountNumber: rawTo,
+      destinationBankCode: normalizedBank || "999240",
+      resolvedBy: "direct-account-number",
+    };
+  }
+
+  const accounts = await _safehavenListMainAccounts();
+  const active = accounts.filter(
+    (a) => !a.isSubAccount && a.status.toLowerCase() !== "inactive",
+  );
+  const matched =
+    active.find((a) => a.id && a.id === rawTo) ||
+    active.find((a) => a.accountNumber && a.accountNumber === rawTo) ||
+    active.find((a) => a.isDefault) ||
+    active[0] ||
+    null;
+
+  if (!matched || !matched.accountNumber) {
+    throw new HttpsError(
+      "failed-precondition",
+      "Could not resolve destination SafeHaven account number",
+    );
+  }
+
+  return {
+    toAccountNumber: matched.accountNumber,
+    destinationBankCode: "999240",
+    resolvedBy:
+      matched.id === rawTo
+        ? "safehaven-account-id"
+        : "safehaven-default-main-account",
+    resolvedAccountId: matched.id,
+    resolvedAccountName: matched.accountName,
+  };
 };
 // ============================================================
 // End Safe Haven MFB API helpers
@@ -2055,21 +2448,28 @@ exports.safehavenCreateUser = onCallLogged(
     } = data.data;
 
     const uid = data.auth?.uid;
-    if (!uid) throw new HttpsError("unauthenticated", "User is not authenticated");
+    if (!uid)
+      throw new HttpsError("unauthenticated", "User is not authenticated");
 
     // Store user setup data in Firestore for use during createElectronicAccount
-    await db.collection("safehavenUserSetup").doc(uid).set({
-      firstName: firstName?.trim() || "",
-      lastName: lastName?.trim() || "",
-      email: email?.trim() || "",
-      phoneNumber: phoneNumber?.trim() || "",
-      country: country?.trim() || "NG",
-      state: state?.trim() || "",
-      addressLine1: addressLine1?.trim() || "",
-      city: city?.trim() || "",
-      postalCode: postalCode?.trim() || "",
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    }, { merge: true });
+    await db
+      .collection("safehavenUserSetup")
+      .doc(uid)
+      .set(
+        {
+          firstName: firstName?.trim() || "",
+          lastName: lastName?.trim() || "",
+          email: email?.trim() || "",
+          phoneNumber: phoneNumber?.trim() || "",
+          country: country?.trim() || "NG",
+          state: state?.trim() || "",
+          addressLine1: addressLine1?.trim() || "",
+          city: city?.trim() || "",
+          postalCode: postalCode?.trim() || "",
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
 
     // Return Anchor-compatible response ï¿½ uid is used as the "customer ID"
     return {
@@ -2077,7 +2477,10 @@ exports.safehavenCreateUser = onCallLogged(
         id: uid,
         type: "IndividualCustomer",
         attributes: {
-          fullName: { firstName: firstName?.trim() || "", lastName: lastName?.trim() || "" },
+          fullName: {
+            firstName: firstName?.trim() || "",
+            lastName: lastName?.trim() || "",
+          },
           email: email?.trim() || "",
           phoneNumber: phoneNumber?.trim() || "",
           status: "ACTIVE",
@@ -2107,7 +2510,9 @@ exports.safehavenCreateBusinessUser = onCallLogged(
       throw new HttpsError("unauthenticated", "User is not authenticated");
     }
 
-    const officers = Array.isArray(data.data.officers) ? data.data.officers : [];
+    const officers = Array.isArray(data.data.officers)
+      ? data.data.officers
+      : [];
     const firstOfficer = officers[0] || {};
 
     const businessName = String(data.data.businessName || "").trim();
@@ -2120,14 +2525,13 @@ exports.safehavenCreateBusinessUser = onCallLogged(
         "",
     ).trim();
     const identityId = String(
-      data.data.identityId ||
-        firstOfficer.bvn ||
-        data.data.businessBvn ||
-        "",
+      data.data.identityId || firstOfficer.bvn || data.data.businessBvn || "",
     ).trim();
 
     const autoSweep = Boolean(data.data.autoSweep);
-    const autoSweepAccountNumber = String(data.data.autoSweepAccountNumber || "").trim();
+    const autoSweepAccountNumber = String(
+      data.data.autoSweepAccountNumber || "",
+    ).trim();
 
     const subAccountPayload = {
       phoneNumber,
@@ -2155,21 +2559,27 @@ exports.safehavenCreateBusinessUser = onCallLogged(
     const acct = resp.data || {};
     const accountId = acct._id || acct.id || uid;
 
-    await db.collection("safehavenUserSetup").doc(uid).set({
-      safehavenAccountId: accountId,
-      safehavenAccountNumber: acct.accountNumber || "",
-      safehavenBankCode: acct.bankCode || "090286",
-      safehavenBankName: acct.bankName || "Safe Haven MFB",
-      businessProfile: {
-        businessName,
-        email,
-        phoneNumber,
-        companyRegistrationNumber,
-        identityId,
-        accountType: acct.subAccountDetails?.accountType || "Corporate",
-      },
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    }, { merge: true });
+    await db
+      .collection("safehavenUserSetup")
+      .doc(uid)
+      .set(
+        {
+          safehavenAccountId: accountId,
+          safehavenAccountNumber: acct.accountNumber || "",
+          safehavenBankCode: acct.bankCode || "090286",
+          safehavenBankName: acct.bankName || "Safe Haven MFB",
+          businessProfile: {
+            businessName,
+            email,
+            phoneNumber,
+            companyRegistrationNumber,
+            identityId,
+            accountType: acct.subAccountDetails?.accountType || "Corporate",
+          },
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
 
     return {
       data: {
@@ -2207,7 +2617,10 @@ exports.safehavenVerifyBusinessCustomer = onCallLogged(
     validateData(data.data, requiredFields);
     const customerId = String(data.data.customerId || "").trim();
 
-    const setupDoc = await db.collection("safehavenUserSetup").doc(customerId).get();
+    const setupDoc = await db
+      .collection("safehavenUserSetup")
+      .doc(customerId)
+      .get();
     if (!setupDoc.exists) {
       throw new HttpsError("not-found", "Business customer profile not found");
     }
@@ -2226,7 +2639,10 @@ exports.safehavenVerifyBusinessCustomer = onCallLogged(
         safehavenData = accountResp.data || null;
         accountStatus = safehavenData?.status || "ACTIVE";
       } catch (err) {
-        console.warn("[verifyBusinessCustomer] Safehaven lookup failed:", err.message);
+        console.warn(
+          "[verifyBusinessCustomer] Safehaven lookup failed:",
+          err.message,
+        );
       }
     }
 
@@ -2262,27 +2678,33 @@ exports.safehavenUpgradeCustomerKyc = onCallLogged(
     ]);
 
     const uid = data.auth?.uid;
-    if (!uid) throw new HttpsError("unauthenticated", "User is not authenticated");
+    if (!uid)
+      throw new HttpsError("unauthenticated", "User is not authenticated");
 
-    const {
-      level,
-      bvn,
-      idNumber,
-      idType,
-      dateOfBirth,
-      gender,
-      expiryDate,
-    } = data.data;
+    const { level, bvn, idNumber, idType, dateOfBirth, gender, expiryDate } =
+      data.data;
 
-    if (level === "TIER_2" && (!bvn?.trim() || !dateOfBirth?.trim() || !gender?.trim())) {
-      throw new HttpsError("invalid-argument", "BVN, dateOfBirth, and gender are required for TIER_2");
+    if (
+      level === "TIER_2" &&
+      (!bvn?.trim() || !dateOfBirth?.trim() || !gender?.trim())
+    ) {
+      throw new HttpsError(
+        "invalid-argument",
+        "BVN, dateOfBirth, and gender are required for TIER_2",
+      );
     }
     if (level === "TIER_3" && (!idNumber?.trim() || !idType?.trim())) {
-      throw new HttpsError("invalid-argument", "ID number and ID type are required for TIER_3");
+      throw new HttpsError(
+        "invalid-argument",
+        "ID number and ID type are required for TIER_3",
+      );
     }
 
     // Store KYC data in Firestore for use during createElectronicAccount
-    const kycUpdate = { level, updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+    const kycUpdate = {
+      level,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
     if (level === "TIER_2") {
       kycUpdate.bvn = bvn.trim();
       kycUpdate.dateOfBirth = dateOfBirth.trim();
@@ -2292,7 +2714,10 @@ exports.safehavenUpgradeCustomerKyc = onCallLogged(
       kycUpdate.idType = idType.trim();
       if (expiryDate) kycUpdate.idExpiryDate = expiryDate;
     }
-    await db.collection("safehavenUserSetup").doc(uid).set(kycUpdate, { merge: true });
+    await db
+      .collection("safehavenUserSetup")
+      .doc(uid)
+      .set(kycUpdate, { merge: true });
 
     // Call Safehaven identity validation for TIER_2 (BVN) and TIER_3 (ID doc)
     let safehavenResp = null;
@@ -2319,7 +2744,10 @@ exports.safehavenUpgradeCustomerKyc = onCallLogged(
       }
     } catch (err) {
       // Identity validation errors are non-fatal here; we store the attempt
-      console.warn("[upgradeCustomerKyc] SafeHaven identity validate error:", err.message);
+      console.warn(
+        "[upgradeCustomerKyc] SafeHaven identity validate error:",
+        err.message,
+      );
     }
 
     // Return Anchor-compatible response
@@ -2341,7 +2769,14 @@ exports.safehavenUpgradeCustomerKyc = onCallLogged(
 // Docs: POST /identity/v2
 exports.safehavenInitiateIdentityVerification = onCallLogged(
   "safehavenInitiateIdentityVerification",
-  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl, safehavenDebitAccountNumber] },
+  {
+    secrets: [
+      safehavenClientId,
+      safehavenPrivateKey,
+      safehavenCompanyUrl,
+      safehavenDebitAccountNumber,
+    ],
+  },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
 
@@ -2349,18 +2784,24 @@ exports.safehavenInitiateIdentityVerification = onCallLogged(
       {
         key: "type",
         message: "type is required (BVN or NIN)",
-        validator: (v) => ["BVN", "NIN", "BVNUSSD", "VNIN", "VID"].includes(String(v || "").toUpperCase()),
+        validator: (v) =>
+          ["BVN", "NIN", "BVNUSSD", "VNIN", "VID"].includes(
+            String(v || "").toUpperCase(),
+          ),
       },
       { key: "number", message: "number is required" },
     ]);
 
     const uid = data.auth?.uid;
-    if (!uid) throw new HttpsError("unauthenticated", "User is not authenticated");
+    if (!uid)
+      throw new HttpsError("unauthenticated", "User is not authenticated");
 
     const setupDoc = await db.collection("safehavenUserSetup").doc(uid).get();
     const setup = setupDoc.exists ? setupDoc.data() : {};
 
-    const type = String(data.data.type || "").trim().toUpperCase();
+    const type = String(data.data.type || "")
+      .trim()
+      .toUpperCase();
     const number = String(data.data.number || "").trim();
     const configuredDebitAccount = await _getSafehavenDebitAccountConfig();
     let debitAccountNumber = String(
@@ -2375,22 +2816,31 @@ exports.safehavenInitiateIdentityVerification = onCallLogged(
     const asyncMode = data.data.async !== false;
 
     if (debitAccountNumber) {
-      console.log("[safehavenInitiateIdentityVerification] debit account source", {
-        mode: configuredDebitAccount.mode,
-        source: data.data.debitAccountNumber
-          ? "request"
-          : setup.safehavenAccountNumber
-          ? "safehavenUserSetup"
-          : configuredDebitAccount.source,
-        suffix: debitAccountNumber.slice(-4),
-      });
+      console.log(
+        "[safehavenInitiateIdentityVerification] debit account source",
+        {
+          mode: configuredDebitAccount.mode,
+          source: data.data.debitAccountNumber
+            ? "request"
+            : setup.safehavenAccountNumber
+              ? "safehavenUserSetup"
+              : configuredDebitAccount.source,
+          suffix: debitAccountNumber.slice(-4),
+        },
+      );
     }
 
     // Auto-resolve company main account number when not supplied or when the
     // configured value is the sandbox-default fallback. GET /accounts?isSubAccount=false
     // returns the main (non-sub) accounts for the client.
-    if (!debitAccountNumber || configuredDebitAccount.source === "sandbox-default") {
-      if (configuredDebitAccount.source === "sandbox-default" && debitAccountNumber) {
+    if (
+      !debitAccountNumber ||
+      configuredDebitAccount.source === "sandbox-default"
+    ) {
+      if (
+        configuredDebitAccount.source === "sandbox-default" &&
+        debitAccountNumber
+      ) {
         console.log(
           "[safehavenInitiateIdentityVerification] configured debit account is sandbox-default; attempting /accounts auto-resolve to prefer a real company account",
         );
@@ -2411,27 +2861,41 @@ exports.safehavenInitiateIdentityVerification = onCallLogged(
                 ? rootData.result
                 : [];
 
-        console.log("[safehavenInitiateIdentityVerification] /accounts response shape", {
-          rootIsArray: Array.isArray(rootData),
-          hasDataArray: Array.isArray(rootData?.data),
-          hasAccountsArray: Array.isArray(rootData?.accounts),
-          hasResultArray: Array.isArray(rootData?.result),
-          candidateCount: candidateList.length,
-        });
+        console.log(
+          "[safehavenInitiateIdentityVerification] /accounts response shape",
+          {
+            rootIsArray: Array.isArray(rootData),
+            hasDataArray: Array.isArray(rootData?.data),
+            hasAccountsArray: Array.isArray(rootData?.accounts),
+            hasResultArray: Array.isArray(rootData?.result),
+            candidateCount: candidateList.length,
+          },
+        );
 
         const firstAccount = candidateList[0] || rootData;
-        console.log("[safehavenInitiateIdentityVerification] /accounts first account keys", {
-          keys: firstAccount && typeof firstAccount === "object" ? Object.keys(firstAccount) : [],
-          hasAccountNumber: Boolean(firstAccount?.accountNumber),
-        });
+        console.log(
+          "[safehavenInitiateIdentityVerification] /accounts first account keys",
+          {
+            keys:
+              firstAccount && typeof firstAccount === "object"
+                ? Object.keys(firstAccount)
+                : [],
+            hasAccountNumber: Boolean(firstAccount?.accountNumber),
+          },
+        );
 
         const resolved = String(firstAccount?.accountNumber || "").trim();
         if (resolved) {
           debitAccountNumber = resolved;
-          console.log(`[safehavenInitiateIdentityVerification] Resolved company debitAccountNumber: ${debitAccountNumber}`);
+          console.log(
+            `[safehavenInitiateIdentityVerification] Resolved company debitAccountNumber: ${debitAccountNumber}`,
+          );
         }
       } catch (fetchErr) {
-        console.warn("[safehavenInitiateIdentityVerification] Could not auto-resolve company account:", fetchErr.message);
+        console.warn(
+          "[safehavenInitiateIdentityVerification] Could not auto-resolve company account:",
+          fetchErr.message,
+        );
       }
     }
 
@@ -2458,22 +2922,25 @@ exports.safehavenInitiateIdentityVerification = onCallLogged(
       verification._id || verification.id || verification.identityId || "",
     ).trim();
 
-    await db.collection("safehavenUserSetup").doc(uid).set(
-      {
-        identityVerification: {
+    await db
+      .collection("safehavenUserSetup")
+      .doc(uid)
+      .set(
+        {
+          identityVerification: {
+            identityId: identityId || null,
+            type,
+            number,
+            status: verification.status || "PENDING",
+            initiatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            rawInitiate: verification,
+          },
           identityId: identityId || null,
-          type,
-          number,
-          status: verification.status || "PENDING",
-          initiatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          rawInitiate: verification,
+          identityType: identityId ? "vID" : setup.identityType || null,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         },
-        identityId: identityId || null,
-        identityType: identityId ? "vID" : setup.identityType || null,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true },
-    );
+        { merge: true },
+      );
 
     return {
       data: {
@@ -2499,16 +2966,22 @@ exports.safehavenValidateIdentityVerification = onCallLogged(
       {
         key: "type",
         message: "type is required (BVN or NIN)",
-        validator: (v) => ["BVN", "NIN", "BVNUSSD", "VNIN", "VID"].includes(String(v || "").toUpperCase()),
+        validator: (v) =>
+          ["BVN", "NIN", "BVNUSSD", "VNIN", "VID"].includes(
+            String(v || "").toUpperCase(),
+          ),
       },
       { key: "otp", message: "otp is required" },
     ]);
 
     const uid = data.auth?.uid;
-    if (!uid) throw new HttpsError("unauthenticated", "User is not authenticated");
+    if (!uid)
+      throw new HttpsError("unauthenticated", "User is not authenticated");
 
     const identityId = String(data.data.identityId || "").trim();
-    const type = String(data.data.type || "").trim().toUpperCase();
+    const type = String(data.data.type || "")
+      .trim()
+      .toUpperCase();
     const otp = String(data.data.otp || "").trim();
 
     const resp = await safehavenRequest({
@@ -2526,21 +2999,24 @@ exports.safehavenValidateIdentityVerification = onCallLogged(
       verification._id || verification.identityId || identityId,
     ).trim();
 
-    await db.collection("safehavenUserSetup").doc(uid).set(
-      {
-        identityVerification: {
+    await db
+      .collection("safehavenUserSetup")
+      .doc(uid)
+      .set(
+        {
+          identityVerification: {
+            identityId: resolvedIdentityId,
+            type,
+            status: verification.status || "VALIDATED",
+            validatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            rawValidate: verification,
+          },
           identityId: resolvedIdentityId,
-          type,
-          status: verification.status || "VALIDATED",
-          validatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          rawValidate: verification,
+          identityType: "vID",
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         },
-        identityId: resolvedIdentityId,
-        identityType: "vID",
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true },
-    );
+        { merge: true },
+      );
 
     return {
       data: {
@@ -2557,7 +3033,14 @@ exports.safehavenValidateIdentityVerification = onCallLogged(
 // Creates a Safehaven sub-account under the company account.
 exports.safehavenCreateSubAccount = onCallLogged(
   "safehavenCreateSubAccount",
-  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl, safehavenDebitAccountNumber] },
+  {
+    secrets: [
+      safehavenClientId,
+      safehavenPrivateKey,
+      safehavenCompanyUrl,
+      safehavenDebitAccountNumber,
+    ],
+  },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
 
@@ -2566,7 +3049,8 @@ exports.safehavenCreateSubAccount = onCallLogged(
     ]);
 
     const uid = data.auth?.uid;
-    if (!uid) throw new HttpsError("unauthenticated", "User is not authenticated");
+    if (!uid)
+      throw new HttpsError("unauthenticated", "User is not authenticated");
 
     const idempotencyKey = data.data.idempotencyKey.trim();
 
@@ -2584,7 +3068,10 @@ exports.safehavenCreateSubAccount = onCallLogged(
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     };
 
-    await db.collection("safehavenUserSetup").doc(uid).set(setupPatch, { merge: true });
+    await db
+      .collection("safehavenUserSetup")
+      .doc(uid)
+      .set(setupPatch, { merge: true });
 
     // Read user info stored for subaccount creation.
     const setupDoc = await db.collection("safehavenUserSetup").doc(uid).get();
@@ -2596,20 +3083,29 @@ exports.safehavenCreateSubAccount = onCallLogged(
     ).trim();
     // If the webhook already marked this identityId as FAILED, discard it so
     // we fall through to the BVN fallback path without a wasted 500 round-trip.
-    const storedIdentityStatus = String(setup.identityCheckStatus || "").trim().toUpperCase();
+    const storedIdentityStatus = String(setup.identityCheckStatus || "")
+      .trim()
+      .toUpperCase();
     const rawResolvedId = requestedIdentityId || setupIdentityId;
-    const resolvedIdentityId = (storedIdentityStatus === "FAILED" && !requestedIdentityId)
-      ? ""
-      : rawResolvedId;
+    const resolvedIdentityId =
+      storedIdentityStatus === "FAILED" && !requestedIdentityId
+        ? ""
+        : rawResolvedId;
 
     const requestedIdentityType = String(data.data.identityType || "").trim();
-    const resolvedIdentityType = requestedIdentityType || (resolvedIdentityId ? "vID" : "BVN");
+    const resolvedIdentityType =
+      requestedIdentityType || (resolvedIdentityId ? "vID" : "BVN");
 
-    const externalReference = String(data.data.externalReference || idempotencyKey).trim() || idempotencyKey;
-    const companyRegistrationNumber = String(data.data.companyRegistrationNumber || "").trim();
+    const externalReference =
+      String(data.data.externalReference || idempotencyKey).trim() ||
+      idempotencyKey;
+    const companyRegistrationNumber = String(
+      data.data.companyRegistrationNumber || "",
+    ).trim();
     const autoSweep = Boolean(data.data.autoSweep);
     const autoSweepDetails =
-      data.data.autoSweepDetails && typeof data.data.autoSweepDetails === "object"
+      data.data.autoSweepDetails &&
+      typeof data.data.autoSweepDetails === "object"
         ? data.data.autoSweepDetails
         : null;
 
@@ -2622,11 +3118,17 @@ exports.safehavenCreateSubAccount = onCallLogged(
     };
 
     if (!subAccountBody.phoneNumber) {
-      throw new HttpsError("invalid-argument", "phoneNumber is required to create subaccount");
+      throw new HttpsError(
+        "invalid-argument",
+        "phoneNumber is required to create subaccount",
+      );
     }
 
     if (!subAccountBody.emailAddress) {
-      throw new HttpsError("invalid-argument", "email is required to create subaccount");
+      throw new HttpsError(
+        "invalid-argument",
+        "email is required to create subaccount",
+      );
     }
 
     if (companyRegistrationNumber) {
@@ -2672,12 +3174,21 @@ exports.safehavenCreateSubAccount = onCallLogged(
         );
         // BVN mode requires an identityId obtained from POST /identity/v2 first.
         const debitAccountConfig = await _getSafehavenDebitAccountConfig();
-        const debitAccountNumber = debitAccountConfig.debitAccountNumber || "0104610514";
-        console.log("[safehavenCreateSubAccount] Initiating BVN identity check", { debitSource: debitAccountConfig.source });
+        const debitAccountNumber =
+          debitAccountConfig.debitAccountNumber || "0104610514";
+        console.log(
+          "[safehavenCreateSubAccount] Initiating BVN identity check",
+          { debitSource: debitAccountConfig.source },
+        );
         const identityInitResp = await safehavenRequest({
           path: "/identity/v2",
           method: "POST",
-          body: { type: "BVN", number: bvnForFallback, debitAccountNumber, async: false },
+          body: {
+            type: "BVN",
+            number: bvnForFallback,
+            debitAccountNumber,
+            async: false,
+          },
         });
         const bvnIdentityId =
           identityInitResp?._id ||
@@ -2685,10 +3196,15 @@ exports.safehavenCreateSubAccount = onCallLogged(
           identityInitResp?.data?.id ||
           identityInitResp?.id;
         const bvnIdentityStatus = String(
-          identityInitResp?.data?.status || identityInitResp?.status || ""
-        ).trim().toUpperCase();
+          identityInitResp?.data?.status || identityInitResp?.status || "",
+        )
+          .trim()
+          .toUpperCase();
         if (!bvnIdentityId) {
-          throw new HttpsError("internal", "BVN identity check failed: no identityId returned from /identity/v2");
+          throw new HttpsError(
+            "internal",
+            "BVN identity check failed: no identityId returned from /identity/v2",
+          );
         }
         if (bvnIdentityStatus && bvnIdentityStatus !== "SUCCESS") {
           throw new HttpsError(
@@ -2696,14 +3212,20 @@ exports.safehavenCreateSubAccount = onCallLogged(
             `BVN identity check status: ${bvnIdentityStatus}. Debit may have failed â€” check debitAccountNumber.`,
           );
         }
-        console.log("[safehavenCreateSubAccount] BVN identity check OK", { bvnIdentityId, bvnIdentityStatus });
+        console.log("[safehavenCreateSubAccount] BVN identity check OK", {
+          bvnIdentityId,
+          bvnIdentityStatus,
+        });
         const bvnBody = {
           ...subAccountBody,
           identityType: "BVN",
           identityId: bvnIdentityId,
         };
         delete bvnBody.identityNumber;
-        console.log("[safehavenCreateSubAccount] Retrying subaccount creation with BVN fallback", { bvnBody });
+        console.log(
+          "[safehavenCreateSubAccount] Retrying subaccount creation with BVN fallback",
+          { bvnBody },
+        );
         resp = await safehavenRequest({
           path: "/accounts/subaccount",
           method: "POST",
@@ -2715,7 +3237,9 @@ exports.safehavenCreateSubAccount = onCallLogged(
     }
 
     const acct = resp.data || {};
-    console.log("[safehavenCreateSubAccount] subaccount creation response", { resp: acct });
+    console.log("[safehavenCreateSubAccount] subaccount creation response", {
+      resp: acct,
+    });
     const accountId = acct._id || acct.id || uid;
     const accountNumber = acct.accountNumber || "";
     const bankCode = acct.bankCode || "090286";
@@ -2723,16 +3247,22 @@ exports.safehavenCreateSubAccount = onCallLogged(
     const accountName = acct.accountName || "";
 
     // Persist mapping for later lookups
-    await db.collection("safehavenUserSetup").doc(uid).set({
-      safehavenAccountId: accountId,
-      safehavenAccountNumber: accountNumber,
-      safehavenBankCode: bankCode,
-      safehavenBankName: bankName,
-      safehavenAccountName: accountName,
-      identityId: resolvedIdentityId || null,
-      identityType: subAccountBody.identityType,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    }, { merge: true });
+    await db
+      .collection("safehavenUserSetup")
+      .doc(uid)
+      .set(
+        {
+          safehavenAccountId: accountId,
+          safehavenAccountNumber: accountNumber,
+          safehavenBankCode: bankCode,
+          safehavenBankName: bankName,
+          safehavenAccountName: accountName,
+          identityId: resolvedIdentityId || null,
+          identityType: subAccountBody.identityType,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
 
     // Return Anchor-compatible shape that Flutter stores under getAnchorData.virtualAccount
     return {
@@ -2769,13 +3299,21 @@ exports.safehavenFetchAccountBalance = onCall(
     if (accountId.length > 24) {
       const callerUid = data.auth?.uid;
       if (callerUid) {
-        const setupSnap = await db.collection("safehavenUserSetup").doc(callerUid).get();
+        const setupSnap = await db
+          .collection("safehavenUserSetup")
+          .doc(callerUid)
+          .get();
         const realId = setupSnap.data()?.safehavenAccountId;
         if (realId && realId.length <= 24) {
-          console.log(`[safehavenFetchAccountBalance] Resolved Firebase UID to SafeHaven accountId: ${realId}`);
+          console.log(
+            `[safehavenFetchAccountBalance] Resolved Firebase UID to SafeHaven accountId: ${realId}`,
+          );
           accountId = realId;
         } else {
-          throw new HttpsError("not-found", "SafeHaven account ID not found. Please contact support.");
+          throw new HttpsError(
+            "not-found",
+            "SafeHaven account ID not found. Please contact support.",
+          );
         }
       }
     }
@@ -2788,7 +3326,9 @@ exports.safehavenFetchAccountBalance = onCall(
     const acct = resp.data || {};
     // Safehaven returns balance in naira; Flutter divides by 100 expecting kobo
     const balanceKobo = Math.round((acct.accountBalance ?? 0) * 100);
-    const ledgerKobo = Math.round((acct.ledgerBalance ?? acct.accountBalance ?? 0) * 100);
+    const ledgerKobo = Math.round(
+      (acct.ledgerBalance ?? acct.accountBalance ?? 0) * 100,
+    );
 
     return {
       data: {
@@ -2878,7 +3418,7 @@ exports.safehavenFetchAccountDetails = onCall(
     ]);
 
     const accountId = data.data.accountId.trim();
-    
+
     const url = `${BASE_URL}/accounts/${encodeURIComponent(accountId)}`;
 
     return makeApiRequest({ url, method: "GET", secretKey });
@@ -2901,13 +3441,21 @@ exports.safehavenFetchAccountNumber = onCall(
     if (accountId.length > 24) {
       const callerUid = data.auth?.uid;
       if (callerUid) {
-        const setupSnap = await db.collection("safehavenUserSetup").doc(callerUid).get();
+        const setupSnap = await db
+          .collection("safehavenUserSetup")
+          .doc(callerUid)
+          .get();
         const realId = setupSnap.data()?.safehavenAccountId;
         if (realId && realId.length <= 24) {
-          console.log(`[safehavenFetchAccountNumber] Resolved Firebase UID to SafeHaven accountId: ${realId}`);
+          console.log(
+            `[safehavenFetchAccountNumber] Resolved Firebase UID to SafeHaven accountId: ${realId}`,
+          );
           accountId = realId;
         } else {
-          throw new HttpsError("not-found", "SafeHaven account ID not found. Please contact support.");
+          throw new HttpsError(
+            "not-found",
+            "SafeHaven account ID not found. Please contact support.",
+          );
         }
       }
     }
@@ -2924,7 +3472,9 @@ exports.safehavenFetchAccountNumber = onCall(
       acct = resp.data || {};
       if (acct.accountNumber) break;
       if (attempt < maxAttempts) {
-        console.log(`[safehavenFetchAccountNumber] accountNumber empty on attempt ${attempt}; retrying in 3s...`);
+        console.log(
+          `[safehavenFetchAccountNumber] accountNumber empty on attempt ${attempt}; retrying in 3s...`,
+        );
         await new Promise((r) => setTimeout(r, 3000));
       }
     }
@@ -2932,7 +3482,10 @@ exports.safehavenFetchAccountNumber = onCall(
     const accountNumber = acct.accountNumber || null;
 
     if (!accountNumber) {
-      throw new HttpsError("not-found", "Account number not yet assigned by SafeHaven");
+      throw new HttpsError(
+        "not-found",
+        "Account number not yet assigned by SafeHaven",
+      );
     }
 
     // Bank is always Safe Haven MFB for subaccounts; include name + code if available
@@ -3063,7 +3616,6 @@ exports.sudoFreezeAccount = onCall(
     const freezeReason = data.data.freezeReason.trim();
     const freezeDescription = data.data.freezeDescription.trim();
 
-    
     const url = `${BASE_URL}/accounts/${encodeURIComponent(accountId)}/freeze`;
 
     const body = {
@@ -3114,7 +3666,6 @@ exports.sudoUnFreezeAccount = onCall(
 
     const accountId = data.data.accountId.trim();
 
-    
     const url = `${BASE_URL}/accounts/unfreeze`;
 
     const body = {
@@ -3158,7 +3709,8 @@ exports.safehavenCreateCounterparty = onCall(
     ]);
 
     const uid = data.auth?.uid;
-    if (!uid) throw new HttpsError("unauthenticated", "User is not authenticated");
+    if (!uid)
+      throw new HttpsError("unauthenticated", "User is not authenticated");
 
     const accountName = data.data.accountName.trim();
     const bankName = data.data.bankName?.trim() || "";
@@ -3171,13 +3723,16 @@ exports.safehavenCreateCounterparty = onCall(
       .doc(uid)
       .collection("beneficiaries")
       .doc(generatedId)
-      .set({
-        accountName,
-        accountNumber,
-        bankCode,
-        bankName,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      }, { merge: true });
+      .set(
+        {
+          accountName,
+          accountNumber,
+          bankCode,
+          bankName,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
 
     return {
       data: {
@@ -3212,7 +3767,8 @@ exports.safehavenTransferNip = onCallLogged(
     ]);
 
     const uid = data.auth?.uid;
-    if (!uid) throw new HttpsError("unauthenticated", "User is not authenticated");
+    if (!uid)
+      throw new HttpsError("unauthenticated", "User is not authenticated");
 
     const counterpartyId = data.data.counterpartyId.trim();
     const amount = data.data.amount; // kobo
@@ -3228,33 +3784,64 @@ exports.safehavenTransferNip = onCallLogged(
     if (!cpDoc.exists) {
       throw new HttpsError("not-found", "Counterparty not found");
     }
-    const cp = cpDoc.data();
+    const cp = cpDoc.data() || {};
+    const cpAccountNumber = String(
+      cp.accountNumber ||
+        cp.recipientAccountNumber ||
+        cp?.data?.attributes?.accountNumber ||
+        "",
+    ).trim();
+    const cpBankCode = String(
+      cp.bankCode ||
+        cp.recipientBankCode ||
+        cp?.data?.attributes?.bank?.id ||
+        "",
+    ).trim();
+
+    if (!cpAccountNumber || !cpBankCode) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Counterparty is missing accountNumber or bankCode",
+      );
+    }
 
     const acctInfo = await _getSafehavenAccountForUser(uid);
-    const debitAccountNumber = acctInfo.accountNumber;
+    const debitAccountNumber = acctInfo?.accountNumber;
     if (!debitAccountNumber) {
       throw new HttpsError("failed-precondition", "Virtual account not set up");
     }
 
-    const enquiry = await _safehavenNameEnquiry(uid, cp.bankCode, cp.accountNumber);
+    const enquiry = await _safehavenNameEnquiry(
+      uid,
+      cpBankCode,
+      cpAccountNumber,
+    );
     const nameEnquiryReference = enquiry.nameEnquiryReference;
     if (!nameEnquiryReference) {
       throw new HttpsError("failed-precondition", "Name enquiry failed");
     }
 
+    const requestBody = {
+      nameEnquiryReference,
+      debitAccountNumber,
+      beneficiaryBankCode: cpBankCode,
+      beneficiaryAccountNumber: cpAccountNumber,
+      narration,
+      amount: amount / 100,
+      saveBeneficiary: false,
+      paymentReference: idempotencyKey,
+    };
+    console.log("[safehavenTransferNip] request", {
+      path: "/transfers",
+      method: "POST",
+      body: requestBody,
+      counterpartyId,
+    });
+
     const resp = await safehavenRequest({
       path: "/transfers",
       method: "POST",
-      body: {
-        nameEnquiryReference,
-        debitAccountNumber,
-        beneficiaryBankCode: cp.bankCode,
-        beneficiaryAccountNumber: cp.accountNumber,
-        narration,
-        amount: amount / 100,
-        saveBeneficiary: false,
-        paymentReference: idempotencyKey,
-      },
+      body: requestBody,
     });
     const tx = resp.data || {};
 
@@ -3294,7 +3881,8 @@ exports.safehavenTransferIntra = onCallLogged(
     ]);
 
     const uid = data.auth?.uid;
-    if (!uid) throw new HttpsError("unauthenticated", "User is not authenticated");
+    if (!uid)
+      throw new HttpsError("unauthenticated", "User is not authenticated");
 
     const fromAccountId = data.data.fromAccountId.trim();
     const toAccountId = data.data.toAccountId.trim();
@@ -3302,44 +3890,163 @@ exports.safehavenTransferIntra = onCallLogged(
     const narration = data.data.narration.trim();
     const idempotencyKey = data.data.idempotencyKey.trim();
 
+    // Helper to get company account details
+    const getCompanyAccount = async () => {
+      try {
+        const resp = await safehavenRequest({
+          path: "/accounts?page=0&limit=100&isSubAccount=false",
+          method: "GET",
+        });
+        const accounts = Array.isArray(resp.data) ? resp.data : [];
+        const defaultAccount =
+          accounts.find((acc) => acc.isDefault === true) || accounts[0];
+        if (defaultAccount) {
+          return {
+            id: defaultAccount._id,
+            accountNumber: defaultAccount.accountNumber,
+            bankCode: "090286",
+          };
+        }
+      } catch (err) {
+        console.error("[getCompanyAccount] Error:", err.message);
+      }
+      return null;
+    };
+
+    // Check if fromAccountId is the company account
+    let resolvedFromAccountNumber = "";
+    let fromAcct = null;
+    let fromUid = uid;
+
+    // Try to find in safehavenUserSetup first
     const fromSnap = await db
       .collection("safehavenUserSetup")
       .where("safehavenAccountId", "==", fromAccountId)
       .limit(1)
       .get();
+
+    if (!fromSnap.empty) {
+      fromAcct = fromSnap.docs[0].data();
+      resolvedFromAccountNumber = fromAcct?.safehavenAccountNumber || "";
+      fromUid = fromSnap.docs[0].id;
+    } else {
+      // Check if it's the company account
+      const companyAccount = await getCompanyAccount();
+      if (companyAccount && companyAccount.id === fromAccountId) {
+        resolvedFromAccountNumber = companyAccount.accountNumber;
+        console.log(
+          "[safehavenTransferIntra] Source is company account:",
+          resolvedFromAccountNumber,
+        );
+      } else {
+        // Try user's own account
+        const acctInfo = await _getSafehavenAccountForUser(uid);
+        if (acctInfo?.accountId === fromAccountId) {
+          resolvedFromAccountNumber = acctInfo.accountNumber;
+        } else if (String(fromAccountId).length === 10) {
+          resolvedFromAccountNumber = fromAccountId;
+        }
+      }
+    }
+
+    // Resolve destination account
+    let toAccountNumber = "";
+    let destinationBankCode = "999240";
+
+    // Try to find in safehavenUserSetup
     const toSnap = await db
       .collection("safehavenUserSetup")
       .where("safehavenAccountId", "==", toAccountId)
       .limit(1)
       .get();
 
-    const fromAcct = fromSnap.empty ? null : fromSnap.docs[0].data();
-    const toAcct = toSnap.empty ? null : toSnap.docs[0].data();
+    if (!toSnap.empty) {
+      const toAcct = toSnap.docs[0].data();
+      toAccountNumber = toAcct?.safehavenAccountNumber || "";
+      destinationBankCode =
+        toAcct?.safehavenBankCode === "090286"
+          ? "999240"
+          : toAcct?.safehavenBankCode || "999240";
+    } else {
+      // Check if destination is the company account
+      const companyAccount = await getCompanyAccount();
+      if (companyAccount && companyAccount.id === toAccountId) {
+        toAccountNumber = companyAccount.accountNumber;
+        destinationBankCode = "999240";
+        console.log(
+          "[safehavenTransferIntra] Destination is company account:",
+          toAccountNumber,
+        );
+      } else if (_looksLikeTenDigitAccountNumber(toAccountId)) {
+        // If toAccountId looks like a 10-digit account number, use it directly
+        toAccountNumber = toAccountId;
+      } else {
+        // Try to resolve via _resolveIntraDestination
+        const resolved = await _resolveIntraDestination({
+          toAccountId,
+          toBankCode: data.data.toBankCode || "999240",
+        });
+        toAccountNumber = resolved.toAccountNumber;
+        destinationBankCode = resolved.destinationBankCode;
+      }
+    }
 
-    const fromAccountNumber = fromAcct?.safehavenAccountNumber || fromAccountId;
-    const toAccountNumber = toAcct?.safehavenAccountNumber || toAccountId;
-    const bankCode = fromAcct?.safehavenBankCode || "090286";
-    const fromUid = fromSnap.empty ? uid : fromSnap.docs[0].id;
+    if (!resolvedFromAccountNumber || !toAccountNumber) {
+      console.error("[safehavenTransferIntra] Resolution failed", {
+        fromAccountId,
+        toAccountId,
+        resolvedFromAccountNumber,
+        toAccountNumber,
+      });
+      throw new HttpsError(
+        "failed-precondition",
+        "Source or destination account number could not be resolved",
+      );
+    }
 
-    const enquiry = await _safehavenNameEnquiry(fromUid, bankCode, toAccountNumber);
+    console.log("[safehavenTransferIntra] resolved-accounts", {
+      fromAccountId,
+      toAccountId,
+      fromUid,
+      resolvedFromAccountNumber,
+      toAccountNumber,
+      destinationBankCode,
+    });
+
+    const enquiry = await _safehavenNameEnquiry(
+      fromUid,
+      destinationBankCode,
+      toAccountNumber,
+    );
     const nameEnquiryReference = enquiry.nameEnquiryReference;
     if (!nameEnquiryReference) {
-      throw new HttpsError("failed-precondition", "Name enquiry failed for destination account");
+      throw new HttpsError(
+        "failed-precondition",
+        "Name enquiry failed for destination account",
+      );
     }
+
+    const requestBody = {
+      nameEnquiryReference,
+      debitAccountNumber: resolvedFromAccountNumber,
+      beneficiaryBankCode: destinationBankCode,
+      beneficiaryAccountNumber: toAccountNumber,
+      narration,
+      amount: amount / 100,
+      saveBeneficiary: false,
+      paymentReference: idempotencyKey,
+    };
+
+    console.log("[safehavenTransferIntra] request", {
+      path: "/transfers",
+      method: "POST",
+      body: requestBody,
+    });
 
     const resp = await safehavenRequest({
       path: "/transfers",
       method: "POST",
-      body: {
-        nameEnquiryReference,
-        debitAccountNumber: fromAccountNumber,
-        beneficiaryBankCode: bankCode,
-        beneficiaryAccountNumber: toAccountNumber,
-        narration,
-        amount: amount / 100,
-        saveBeneficiary: false,
-        paymentReference: idempotencyKey,
-      },
+      body: requestBody,
     });
     const tx = resp.data || {};
 
@@ -3358,6 +4065,156 @@ exports.safehavenTransferIntra = onCallLogged(
     };
   },
 );
+// ==================== FETCH COMPANY ACCOUNT DETAILS FROM SAFEHAVEN ====================
+// This function fetches the company's main SafeHaven account details directly from the API
+// instead of relying on Firestore cached values.
+exports.fetchCompanySafehavenAccounts = onCallLogged(
+  "fetchCompanySafehavenAccounts",
+  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl] },
+  async (data, context) => {
+    await ensureVerifiedOrStandUser(data.auth);
+
+    // Only admins or super agents can fetch company account details
+    const uid = data.auth?.uid;
+    if (!uid) {
+      throw new HttpsError("unauthenticated", "Authentication required");
+    }
+
+    const { isSubAccount = false, page = 0, limit = 100 } = data.data || {};
+
+    // Fetch accounts directly from SafeHaven API
+    const resp = await safehavenRequest({
+      path: `/accounts?page=${page}&limit=${limit}&isSubAccount=${isSubAccount}`,
+      method: "GET",
+    });
+
+    const accounts = Array.isArray(resp.data) ? resp.data : [];
+
+    // Find the default account or main NGN settlement account
+    const defaultAccount =
+      accounts.find((acc) => acc.isDefault === true) || accounts[0] || null;
+
+    // Find main NGN account (non-sub account, Active status, NGN currency)
+    const ngnMainAccount =
+      accounts.find(
+        (acc) =>
+          acc.isSubAccount === false &&
+          acc.currencyCode === "NGN" &&
+          acc.status === "Active",
+      ) || defaultAccount;
+
+    // Update Firestore cache for future reads
+    if (ngnMainAccount) {
+      const companyRef = db
+        .collection("company")
+        .doc("safehavenAccountDetails");
+      const updateData = {
+        safehavenAccountId: ngnMainAccount._id,
+        safehavenAccountNumber: ngnMainAccount.accountNumber,
+        safehavenAccountName: ngnMainAccount.accountName,
+        safehavenBankCode: "090286", // Safe Haven MFB code
+        safehavenBankName: "Safe Haven MFB",
+        safehavenAccountType: ngnMainAccount.accountType,
+        safehavenAccountBalance: ngnMainAccount.accountBalance,
+        lastFetchedAt: admin.firestore.FieldValue.serverTimestamp(),
+      };
+
+      companyRef.set(updateData, { merge: true }).catch((err) => {
+        console.warn(
+          "[fetchCompanySafehavenAccounts] Failed to cache accounts:",
+          err.message,
+        );
+      });
+    }
+
+    // Transform to a format that the Flutter app expects
+    const formattedAccounts = accounts.map((acc) => ({
+      id: acc._id,
+      accountNumber: acc.accountNumber,
+      accountName: acc.accountName,
+      accountType: acc.accountType,
+      currency: acc.currencyCode,
+      balance: acc.accountBalance,
+      bookBalance: acc.bookBalance,
+      status: acc.status,
+      isDefault: acc.isDefault,
+      isSubAccount: acc.isSubAccount,
+      createdAt: acc.createdAt,
+    }));
+
+    return {
+      success: true,
+      accounts: formattedAccounts,
+      defaultAccount: defaultAccount
+        ? {
+            id: defaultAccount._id,
+            accountNumber: defaultAccount.accountNumber,
+            accountName: defaultAccount.accountName,
+            accountType: defaultAccount.accountType,
+            currency: defaultAccount.currencyCode,
+            balance: defaultAccount.accountBalance,
+            isDefault: defaultAccount.isDefault,
+          }
+        : null,
+      companyAccount: ngnMainAccount
+        ? {
+            id: ngnMainAccount._id,
+            accountNumber: ngnMainAccount.accountNumber,
+            accountName: ngnMainAccount.accountName,
+            accountType: ngnMainAccount.accountType,
+            currency: ngnMainAccount.currencyCode,
+            balance: ngnMainAccount.accountBalance,
+          }
+        : null,
+      pagination: resp.pagination,
+    };
+  },
+);
+
+// Helper function to get company default account ID (used internally)
+const _getCompanyDefaultAccountId = async () => {
+  try {
+    const resp = await safehavenRequest({
+      path: "/accounts?page=0&limit=1&isSubAccount=false",
+      method: "GET",
+    });
+    const accounts = Array.isArray(resp.data) ? resp.data : [];
+    const defaultAccount =
+      accounts.find((acc) => acc.isDefault === true) || accounts[0];
+    if (defaultAccount && defaultAccount._id) {
+      return defaultAccount._id;
+    }
+  } catch (err) {
+    console.error("[_getCompanyDefaultAccountId] Error:", err.message);
+  }
+  return null;
+};
+
+// Helper function to get company account details by account number
+const _getCompanyAccountByAccountNumber = async (accountNumber) => {
+  try {
+    const resp = await safehavenRequest({
+      path: `/accounts?page=0&limit=100&isSubAccount=false`,
+      method: "GET",
+    });
+    const accounts = Array.isArray(resp.data) ? resp.data : [];
+    const match = accounts.find(
+      (acc) => acc.accountNumber === accountNumber && acc.status === "Active",
+    );
+    if (match) {
+      return {
+        id: match._id,
+        accountNumber: match.accountNumber,
+        accountName: match.accountName,
+        currency: match.currencyCode,
+        balance: match.accountBalance,
+      };
+    }
+  } catch (err) {
+    console.error(`[_getCompanyAccountByAccountNumber] Error:`, err.message);
+  }
+  return null;
+};
 
 // Verify Transfer
 exports.sudoVerifyTransfer = onCall(
@@ -3377,7 +4234,7 @@ exports.sudoVerifyTransfer = onCall(
     ]);
 
     const transferId = data.data.transferId.trim();
-    
+
     const url = `${BASE_URL}/transfers/verify/${encodeURIComponent(
       transferId,
     )}`;
@@ -3473,7 +4330,10 @@ exports.safehavenNameEnquiry = onCallLogged(
     const bankCodeRaw = data.data.bankIdOrBankCode ?? data.data.bankCode;
     const bankCode = String(bankCodeRaw || "").trim();
     if (!bankCode) {
-      throw new HttpsError("invalid-argument", "Bank ID or bank code is required");
+      throw new HttpsError(
+        "invalid-argument",
+        "Bank ID or bank code is required",
+      );
     }
 
     const enquiry = await _safehavenNameEnquiry(uid, bankCode, accountNumber);
@@ -3517,7 +4377,8 @@ exports.safehavenListBillerProducts = onCall(
     const products = Array.isArray(resp.data) ? resp.data : [];
     return {
       data: products.map((p) => {
-        const amountKobo = p.amount == null ? 0 : Math.round(Number(p.amount) * 100);
+        const amountKobo =
+          p.amount == null ? 0 : Math.round(Number(p.amount) * 100);
         return {
           id: p.bundleCode || p.slug || p.name,
           type: "BillerProduct",
@@ -3581,7 +4442,8 @@ exports.safehavenGetTransfers = onCallLogged(
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
     const uid = data.auth?.uid;
-    if (!uid) throw new HttpsError("unauthenticated", "User is not authenticated");
+    if (!uid)
+      throw new HttpsError("unauthenticated", "User is not authenticated");
 
     const acct = await _getSafehavenAccountForUser(uid);
     const accountId =
@@ -3612,7 +4474,8 @@ exports.safehavenGetTransfers = onCallLogged(
         attributes: {
           amount: Math.round((tx.amount || 0) * 100),
           status: tx.status || "PENDING",
-          direction: (tx.type || "").toLowerCase() === "inwards" ? "credit" : "debit",
+          direction:
+            (tx.type || "").toLowerCase() === "inwards" ? "credit" : "debit",
           narration: tx.narration || "",
           reference: tx.paymentReference || "",
           provider: tx.provider || "BANK",
@@ -3677,8 +4540,13 @@ const verifySignature = (rawBody, signature, secret) => {
   const normalized = signatureValue.replace(/^sha1=/i, "");
 
   // Anchor docs: Base64(HMAC_SHA1(payload, secret).hexdigest())
-  const expectedHex = crypto.createHmac("sha1", secret).update(rawBody).digest("hex");
-  const expectedDocSignature = Buffer.from(expectedHex, "utf8").toString("base64");
+  const expectedHex = crypto
+    .createHmac("sha1", secret)
+    .update(rawBody)
+    .digest("hex");
+  const expectedDocSignature = Buffer.from(expectedHex, "utf8").toString(
+    "base64",
+  );
 
   if (_safeTimingEqualString(normalized, expectedDocSignature)) {
     return { valid: true, mode: "anchor-doc-base64-hex" };
@@ -3716,10 +4584,14 @@ const verifySafehavenSignature = (rawBody, signature, secret) => {
     return { valid: false, mode: "missing-input" };
   }
 
-  const rawSignature = Array.isArray(signature) ? String(signature[0]) : String(signature);
+  const rawSignature = Array.isArray(signature)
+    ? String(signature[0])
+    : String(signature);
 
   // Try to detect tagged format like "sha256=..." or "sha1=..."
-  const tagMatch = rawSignature.match(/(sha1|sha256)\s*=\s*([A-Za-z0-9+/_=-]+)/i);
+  const tagMatch = rawSignature.match(
+    /(sha1|sha256)\s*=\s*([A-Za-z0-9+/_=-]+)/i,
+  );
   let algo = null;
   let signatureValue = rawSignature;
   if (tagMatch) {
@@ -3733,7 +4605,10 @@ const verifySafehavenSignature = (rawBody, signature, secret) => {
   }
 
   // Compute expected HMAC digest (hex)
-  const expectedHex = crypto.createHmac(algo, secret).update(rawBody).digest("hex");
+  const expectedHex = crypto
+    .createHmac(algo, secret)
+    .update(rawBody)
+    .digest("hex");
   const expectedDigest = Buffer.from(expectedHex, "hex");
 
   // If provided signature is hex
@@ -3767,10 +4642,17 @@ safehavenApp.post("/", async (req, res) => {
     const headers = req.headers || {};
     const rawBodyString = rawBody ? rawBody.toString("utf8") : "";
     let parsed = null;
-    try { parsed = rawBodyString ? JSON.parse(rawBodyString) : req.body; } catch (e) { parsed = req.body || null; }
+    try {
+      parsed = rawBodyString ? JSON.parse(rawBodyString) : req.body;
+    } catch (e) {
+      parsed = req.body || null;
+    }
 
     console.log("[SafeHaven webhook] received", {
-      bodyPreview: rawBodyString.length > 1000 ? `${rawBodyString.slice(0, 1000)}...[truncated]` : rawBodyString,
+      bodyPreview:
+        rawBodyString.length > 1000
+          ? `${rawBodyString.slice(0, 1000)}...[truncated]`
+          : rawBodyString,
     });
 
     // Persist webhook to Firestore for later inspection
@@ -3787,25 +4669,38 @@ safehavenApp.post("/", async (req, res) => {
     // Post-process some SafeHaven webhook events (non-blocking best-effort)
     (async () => {
       try {
-        const evtType = parsed && (parsed.type || parsed.eventType)
-          ? (parsed.type || parsed.eventType)
-          : null;
+        const evtType =
+          parsed && (parsed.type || parsed.eventType)
+            ? parsed.type || parsed.eventType
+            : null;
 
         // identityCreditCheck is emitted when SafeHaven performs the small debit
         // used to verify identity during BVN flows. We notify the user by device
         // token and email when this occurs so the client can react.
-        if (evtType && evtType.toString().toLowerCase() === "identitycreditcheck") {
+        if (
+          evtType &&
+          evtType.toString().toLowerCase() === "identitycreditcheck"
+        ) {
           const payload = parsed.data || parsed;
           const accountNumber = String(
-            payload.debitAccountNumber || payload.accountNumber || payload.debitAccount || "",
+            payload.debitAccountNumber ||
+              payload.accountNumber ||
+              payload.debitAccount ||
+              "",
           ).trim();
-          const status = String(payload.status || "").trim().toUpperCase();
-          const debitMsg = String(payload.debitMessage || payload.message || payload.reason || "").trim();
+          const status = String(payload.status || "")
+            .trim()
+            .toUpperCase();
+          const debitMsg = String(
+            payload.debitMessage || payload.message || payload.reason || "",
+          ).trim();
 
           // Tie the event to the user who initiated identity verification.
           // safehavenUserSetup is keyed by Firebase UID and stores identityId
           // from safehavenInitiateIdentityVerification â€” this is the authoritative link.
-          const identityCheckId = String(payload._id || payload.id || "").trim();
+          const identityCheckId = String(
+            payload._id || payload.id || "",
+          ).trim();
           let resolvedUid = null;
 
           if (identityCheckId) {
@@ -3818,31 +4713,49 @@ safehavenApp.post("/", async (req, res) => {
               if (!setupQuery.empty) {
                 resolvedUid = setupQuery.docs[0].id; // doc ID is the Firebase UID
                 // Persist status so safehavenCreateSubAccount can skip a FAILED identityId
-                await setupQuery.docs[0].ref.set({
-                  identityCheckStatus: status,
-                  identityCheckMessage: debitMsg || null,
-                  identityCheckUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
-                }, { merge: true });
-                console.log(`[SafeHaven webhook] identityCreditCheck status ${status} stored for uid ${resolvedUid}, identityId ${identityCheckId}`);
+                await setupQuery.docs[0].ref.set(
+                  {
+                    identityCheckStatus: status,
+                    identityCheckMessage: debitMsg || null,
+                    identityCheckUpdatedAt:
+                      admin.firestore.FieldValue.serverTimestamp(),
+                  },
+                  { merge: true },
+                );
+                console.log(
+                  `[SafeHaven webhook] identityCreditCheck status ${status} stored for uid ${resolvedUid}, identityId ${identityCheckId}`,
+                );
               } else {
-                console.log(`[SafeHaven webhook] no safehavenUserSetup found for identityId ${identityCheckId}`);
+                console.log(
+                  `[SafeHaven webhook] no safehavenUserSetup found for identityId ${identityCheckId}`,
+                );
               }
             } catch (setupErr) {
-              console.warn("[SafeHaven webhook] failed to update identityCheckStatus:", setupErr.message);
+              console.warn(
+                "[SafeHaven webhook] failed to update identityCheckStatus:",
+                setupErr.message,
+              );
             }
           }
 
           if (resolvedUid) {
             try {
-              const userSnap = await db.collection("users").doc(resolvedUid).get();
+              const userSnap = await db
+                .collection("users")
+                .doc(resolvedUid)
+                .get();
               const userData = userSnap.exists ? userSnap.data() : {};
               const deviceToken = userData.deviceToken || null;
               const userEmail = userData.email || null;
 
-              const title = status === "FAILED" ? "Identity Verification Debit Failed" : "Identity Verification Debit";
-              const bodyMsg = status === "FAILED"
-                ? `Identity verification debit failed: ${debitMsg} (code: ${payload.debitResponsCode || ""})`
-                : `Identity verification debit ${status.toLowerCase()}.`;
+              const title =
+                status === "FAILED"
+                  ? "Identity Verification Debit Failed"
+                  : "Identity Verification Debit";
+              const bodyMsg =
+                status === "FAILED"
+                  ? `Identity verification debit failed: ${debitMsg} (code: ${payload.debitResponsCode || ""})`
+                  : `Identity verification debit ${status.toLowerCase()}.`;
 
               // Send push notification (best-effort)
               if (deviceToken) {
@@ -3867,7 +4780,10 @@ safehavenApp.post("/", async (req, res) => {
                   amount: payload.amount || null,
                 });
               } catch (saveErr) {
-                console.error("SafeHaven webhook saveNotification error:", saveErr);
+                console.error(
+                  "SafeHaven webhook saveNotification error:",
+                  saveErr,
+                );
               }
 
               // Send email notification (best-effort)
@@ -3885,10 +4801,257 @@ safehavenApp.post("/", async (req, res) => {
                 }
               }
             } catch (notifyErr) {
-              console.error("[SafeHaven webhook] user notification error:", notifyErr);
+              console.error(
+                "[SafeHaven webhook] user notification error:",
+                notifyErr,
+              );
             }
           } else {
-            console.log(`[SafeHaven webhook] identityCreditCheck: could not resolve user for identityId ${identityCheckId}`);
+            console.log(
+              `[SafeHaven webhook] identityCreditCheck: could not resolve user for identityId ${identityCheckId}`,
+            );
+          }
+        }
+
+        // account.credit is emitted when a user's virtual account receives funds.
+        // Notify the user via push + in-app notification + email.
+        // account.credit is emitted when a user's virtual account receives funds.
+        // Notify the user via push + in-app notification + email.
+        if (evtType && evtType.toString().toLowerCase() === "account.credit") {
+          const payload = parsed.data || parsed;
+
+          // Add detailed logging for debugging
+          console.log(
+            "[SafeHaven webhook] account.credit - full payload keys:",
+            Object.keys(payload),
+          );
+          console.log(
+            "[SafeHaven webhook] account.credit - payload:",
+            JSON.stringify(payload, null, 2),
+          );
+
+          // Try multiple possible field names for credit account number
+          const creditAccountNumber = String(
+            payload.creditAccountNumber ||
+              payload.creditAccount ||
+              payload.accountNumber ||
+              payload.realCreditAccountNumber ||
+              payload.beneficiaryAccountNumber ||
+              "",
+          ).trim();
+
+          const amountRaw = Number(payload.amount || 0);
+          const amountDisplay = Number.isFinite(amountRaw)
+            ? amountRaw.toLocaleString("en-NG")
+            : String(payload.amount || "0");
+
+          // Try multiple possible sender name fields
+          const senderName = String(
+            payload.debitAccountName ||
+              payload.senderName ||
+              payload.originatorAccountName ||
+              payload.creditAccountName ||
+              "A bank transfer",
+          ).trim();
+
+          const paymentReference = String(
+            payload.paymentReference ||
+              payload.sessionId ||
+              payload.reference ||
+              "",
+          ).trim();
+
+          console.log("[SafeHaven webhook] account.credit - extracted:", {
+            creditAccountNumber,
+            amountRaw,
+            amountDisplay,
+            senderName,
+            paymentReference,
+          });
+
+          if (!creditAccountNumber) {
+            console.log(
+              "[SafeHaven webhook] account.credit ignored: missing creditAccountNumber",
+            );
+            console.log(
+              "[SafeHaven webhook] account.credit - available account fields:",
+              {
+                hasCreditAccountNumber: !!payload.creditAccountNumber,
+                hasCreditAccount: !!payload.creditAccount,
+                hasAccountNumber: !!payload.accountNumber,
+                hasRealCreditAccountNumber: !!payload.realCreditAccountNumber,
+                hasBeneficiaryAccountNumber: !!payload.beneficiaryAccountNumber,
+              },
+            );
+          } else {
+            let resolvedUid = null;
+            try {
+              // Try multiple paths to find the user
+              const queries = [
+                db
+                  .collection("users")
+                  .where(
+                    "safehavenData.virtualAccount.data.attributes.accountNumber",
+                    "==",
+                    creditAccountNumber,
+                  ),
+                db
+                  .collection("users")
+                  .where(
+                    "safehavenData.virtualAccount.data.id",
+                    "==",
+                    creditAccountNumber,
+                  ),
+                db
+                  .collection("users")
+                  .where("safehavenAccountNumber", "==", creditAccountNumber),
+              ];
+
+              for (const query of queries) {
+                const snap = await query.limit(1).get();
+                if (!snap.empty) {
+                  resolvedUid = snap.docs[0].id;
+                  console.log(
+                    `[SafeHaven webhook] account.credit: found user via query for account ${creditAccountNumber}`,
+                  );
+                  break;
+                }
+              }
+
+              // Also check safehavenUserSetup collection
+              if (!resolvedUid) {
+                const setupSnap = await db
+                  .collection("safehavenUserSetup")
+                  .where("safehavenAccountNumber", "==", creditAccountNumber)
+                  .limit(1)
+                  .get();
+                if (!setupSnap.empty) {
+                  resolvedUid = setupSnap.docs[0].id;
+                  console.log(
+                    `[SafeHaven webhook] account.credit: found user via safehavenUserSetup for account ${creditAccountNumber}`,
+                  );
+                }
+              }
+            } catch (lookupErr) {
+              console.error(
+                "[SafeHaven webhook] account.credit lookup error:",
+                lookupErr,
+              );
+            }
+
+            if (!resolvedUid) {
+              console.log(
+                `[SafeHaven webhook] account.credit: no user found for accountNumber ${creditAccountNumber}`,
+              );
+            } else {
+              try {
+                const userSnap = await db
+                  .collection("users")
+                  .doc(resolvedUid)
+                  .get();
+                const userData = userSnap.exists ? userSnap.data() : {};
+                const deviceToken = userData.deviceToken || null;
+                const userEmail =
+                  userData.email || userData.emailAddress || null;
+
+                console.log(
+                  `[SafeHaven webhook] account.credit: user found - uid: ${resolvedUid}, email: ${userEmail}, hasDeviceToken: ${!!deviceToken}`,
+                );
+
+                const title = "Credit Received";
+                const bodyMsg = `NGN ${amountDisplay} has been credited to your account from ${senderName}.`;
+
+                if (deviceToken) {
+                  try {
+                    await admin.messaging().send({
+                      token: deviceToken,
+                      notification: { title, body: bodyMsg },
+                      data: {
+                        type: "account_credit",
+                        amount: String(payload.amount || ""),
+                        accountNumber: creditAccountNumber,
+                        reference: paymentReference,
+                      },
+                      ...FCM_CHANNEL,
+                    });
+                    console.log(
+                      `[SafeHaven webhook] account.credit push sent successfully to ${resolvedUid}`,
+                    );
+                  } catch (msgErr) {
+                    console.error(
+                      "[SafeHaven webhook] account.credit push error:",
+                      msgErr,
+                    );
+                  }
+                } else {
+                  console.log(
+                    `[SafeHaven webhook] account.credit: no device token for user ${resolvedUid}`,
+                  );
+                }
+
+                try {
+                  await saveNotification(resolvedUid, {
+                    title,
+                    body: bodyMsg,
+                    type: "account_credit",
+                    amount: payload.amount || null,
+                  });
+                  console.log(
+                    `[SafeHaven webhook] account.credit notification saved for ${resolvedUid}`,
+                  );
+                } catch (saveErr) {
+                  console.error(
+                    "[SafeHaven webhook] account.credit saveNotification error:",
+                    saveErr,
+                  );
+                }
+
+                if (userEmail) {
+                  try {
+                    console.log(
+                      `[SafeHaven webhook] account.credit: attempting to send email to ${userEmail}`,
+                    );
+                    const emailResult = await sendNotifyEmail({
+                      to: userEmail,
+                      subject: "Credit Received - PadiPay",
+                      text: `${bodyMsg}${paymentReference ? ` Reference: ${paymentReference}.` : ""}`,
+                      html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#111827;">
+                <h2 style="margin:0 0 16px;color:#10b981;">Credit Received! 🎉</h2>
+                <p style="margin:0 0 16px;">NGN ${amountDisplay} has been credited to your PadiPay account.</p>
+                <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin:0 0 16px;">
+                  <p style="margin:0 0 8px;"><strong>Amount:</strong> NGN ${amountDisplay}</p>
+                  <p style="margin:0 0 8px;"><strong>From:</strong> ${senderName}</p>
+                  ${paymentReference ? `<p style="margin:0;"><strong>Reference:</strong> ${paymentReference}</p>` : ""}
+                </div>
+                <p style="margin:0;color:#6b7280;font-size:13px;">Thank you for using PadiPay!</p>
+              </div>`,
+                    });
+                    console.log(
+                      `[SafeHaven webhook] account.credit email sent successfully to ${userEmail} - result: ${JSON.stringify(emailResult)}`,
+                    );
+                  } catch (emailErr) {
+                    console.error(
+                      "[SafeHaven webhook] account.credit email error:",
+                      {
+                        error: emailErr.message,
+                        stack: emailErr.stack,
+                        userEmail,
+                        resolvedUid,
+                      },
+                    );
+                  }
+                } else {
+                  console.log(
+                    `[SafeHaven webhook] account.credit: no email found for user ${resolvedUid}`,
+                  );
+                }
+              } catch (notifyErr) {
+                console.error(
+                  "[SafeHaven webhook] account.credit notification error:",
+                  notifyErr,
+                );
+              }
+            }
           }
         }
       } catch (postErr) {
@@ -3915,9 +5078,8 @@ app.post("/", async (req, res) => {
       console.error("ANCHOR_WEBHOOK_SECRET is not set");
       return res.status(500).json({ error: "Server configuration error" });
     }
-    const { key: signatureHeaderKey, value: signature } = _pickAnchorSignatureHeader(
-      req.headers,
-    );
+    const { key: signatureHeaderKey, value: signature } =
+      _pickAnchorSignatureHeader(req.headers);
     const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
 
     // SECURITY: Always verify HMAC-SHA1 signature before processing any payload.
@@ -3954,11 +5116,13 @@ app.post("/", async (req, res) => {
       const signatureShape = signature
         ? {
             header: signatureHeaderKey,
-            length: String(Array.isArray(signature) ? signature[0] : signature)
-              .trim()
-              .length,
+            length: String(
+              Array.isArray(signature) ? signature[0] : signature,
+            ).trim().length,
             hasSha1Prefix: /^sha1=/i.test(
-              String(Array.isArray(signature) ? signature[0] : signature).trim(),
+              String(
+                Array.isArray(signature) ? signature[0] : signature,
+              ).trim(),
             ),
           }
         : null;
@@ -4846,8 +6010,7 @@ app.post("/", async (req, res) => {
             method: "GET",
             secretKey: anchorApiSecretForTransfer,
           });
-          const apiTransferStatus =
-            transferApiResp?.data?.attributes?.status;
+          const apiTransferStatus = transferApiResp?.data?.attributes?.status;
           if (apiTransferStatus !== "SUCCESSFUL") {
             console.error(
               `nip.transfer.successful REJECTED ? Anchor API status is "${apiTransferStatus}" for transferId ${transferIdSuccess} (expected SUCCESSFUL)`,
@@ -4996,19 +6159,28 @@ app.post("/", async (req, res) => {
                     // Backward fallback for existing records still on superAgents.
                     const legacyAgentSnap = agentBizSnap.empty
                       ? await admin
-                        .firestore()
-                        .collection("superAgents")
-                        .where("referral_code", "==", saReferralCode)
-                        .limit(1)
-                        .get()
+                          .firestore()
+                          .collection("superAgents")
+                          .where("referral_code", "==", saReferralCode)
+                          .limit(1)
+                          .get()
                       : null;
 
-                    if (!agentBizSnap.empty || (legacyAgentSnap && !legacyAgentSnap.empty)) {
+                    if (
+                      !agentBizSnap.empty ||
+                      (legacyAgentSnap && !legacyAgentSnap.empty)
+                    ) {
                       const isBusinessModel = !agentBizSnap.empty;
-                      const agentDoc = isBusinessModel ? agentBizSnap.docs[0] : legacyAgentSnap.docs[0];
+                      const agentDoc = isBusinessModel
+                        ? agentBizSnap.docs[0]
+                        : legacyAgentSnap.docs[0];
                       const agentId = agentDoc.id;
-                      const NIP_COMMISSION = Number(settings.perNipTransferAmount || 0);
-                      const VERIFIED_BUSINESS_BONUS = Number(settings.verifiedBusinessBonusAmount || 0);
+                      const NIP_COMMISSION = Number(
+                        settings.perNipTransferAmount || 0,
+                      );
+                      const VERIFIED_BUSINESS_BONUS = Number(
+                        settings.verifiedBusinessBonusAmount || 0,
+                      );
 
                       const commissionBatch = admin.firestore().batch();
                       let totalNewEarnings = NIP_COMMISSION;
@@ -5038,13 +6210,16 @@ app.post("/", async (req, res) => {
                           .doc();
                         commissionBatch.set(bonusRef, {
                           superAgentId: agentId,
-                          superAgentBusinessId: isBusinessModel ? agentId : null,
+                          superAgentBusinessId: isBusinessModel
+                            ? agentId
+                            : null,
                           type: "business_verified_bonus",
                           amount: VERIFIED_BUSINESS_BONUS,
                           businessId: senderId,
                           transactionId: transferIdSuccess,
                           status: "credited",
-                          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                          createdAt:
+                            admin.firestore.FieldValue.serverTimestamp(),
                         });
 
                         // Mark bonus as paid so it's never duplicated.
@@ -5054,22 +6229,42 @@ app.post("/", async (req, res) => {
                       }
 
                       if (isBusinessModel) {
-                        const currentTotal = Number(agentDoc.data()?.superAgentTotalEarnings || 0);
+                        const currentTotal = Number(
+                          agentDoc.data()?.superAgentTotalEarnings || 0,
+                        );
                         const newTotal = currentTotal + totalNewEarnings;
-                        const oldStars = Number(agentDoc.data()?.superAgentStars || 0);
-                        const newStars = computeSuperAgentStars(newTotal, settings.starThresholds);
+                        const oldStars = Number(
+                          agentDoc.data()?.superAgentStars || 0,
+                        );
+                        const newStars = computeSuperAgentStars(
+                          newTotal,
+                          settings.starThresholds,
+                        );
 
                         commissionBatch.update(agentDoc.ref, {
-                          superAgentTotalEarnings: admin.firestore.FieldValue.increment(totalNewEarnings),
-                          superAgentAvailableEarnings: admin.firestore.FieldValue.increment(totalNewEarnings),
+                          superAgentTotalEarnings:
+                            admin.firestore.FieldValue.increment(
+                              totalNewEarnings,
+                            ),
+                          superAgentAvailableEarnings:
+                            admin.firestore.FieldValue.increment(
+                              totalNewEarnings,
+                            ),
                           superAgentStars: newStars,
-                          superAgentUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                          superAgentUpdatedAt:
+                            admin.firestore.FieldValue.serverTimestamp(),
                         });
 
                         if (newStars > oldStars) {
-                          const to = String(agentDoc.data()?.businessEmail || "").trim().toLowerCase();
+                          const to = String(
+                            agentDoc.data()?.businessEmail || "",
+                          )
+                            .trim()
+                            .toLowerCase();
                           if (to) {
-                            const businessName = String(agentDoc.data()?.businessName || "Super Agent").trim();
+                            const businessName = String(
+                              agentDoc.data()?.businessName || "Super Agent",
+                            ).trim();
                             const starsLabel = "?".repeat(newStars);
                             await sendNotifyEmail({
                               to,
@@ -5082,8 +6277,14 @@ app.post("/", async (req, res) => {
                       } else {
                         // Legacy fallback update for old superAgents documents.
                         commissionBatch.update(agentDoc.ref, {
-                          total_earnings: admin.firestore.FieldValue.increment(totalNewEarnings),
-                          pending_earnings: admin.firestore.FieldValue.increment(totalNewEarnings),
+                          total_earnings:
+                            admin.firestore.FieldValue.increment(
+                              totalNewEarnings,
+                            ),
+                          pending_earnings:
+                            admin.firestore.FieldValue.increment(
+                              totalNewEarnings,
+                            ),
                         });
                       }
 
@@ -5173,7 +6374,8 @@ app.post("/", async (req, res) => {
               if (receiverUserDoc.exists) {
                 const receiverToken = receiverUserDoc.data().deviceToken;
                 if (receiverToken) {
-                  const formattedAmount = Number(amount).toLocaleString("en-NG");
+                  const formattedAmount =
+                    Number(amount).toLocaleString("en-NG");
                   const receiverMessage = {
                     token: receiverToken,
                     notification: {
@@ -5645,7 +6847,11 @@ app.post("/", async (req, res) => {
             const businessesWithStands = await admin
               .firestore()
               .collection("businesses")
-              .where("posStandAccountIds", "array-contains", settlementAccountId)
+              .where(
+                "posStandAccountIds",
+                "array-contains",
+                settlementAccountId,
+              )
               .limit(1)
               .get();
 
@@ -5943,7 +7149,9 @@ app.post("/", async (req, res) => {
               }
 
               if (!skipNotification) {
-                const formattedPaymentAmount = Number(amount / 100).toLocaleString("en-NG");
+                const formattedPaymentAmount = Number(
+                  amount / 100,
+                ).toLocaleString("en-NG");
                 const message = {
                   token: deviceToken,
                   notification: {
@@ -5992,7 +7200,9 @@ app.post("/", async (req, res) => {
             }
             // If foundIn is posStand, send notification to business owner's deviceToken
             if (deviceToken && foundIn === "posStand") {
-              const formattedPosStandAmount = Number(amount / 100).toLocaleString("en-NG");
+              const formattedPosStandAmount = Number(
+                amount / 100,
+              ).toLocaleString("en-NG");
               const message = {
                 token: deviceToken,
                 notification: {
@@ -6046,12 +7256,12 @@ exports.getanchorWebhook = onRequest(
     // SECURITY: getanchorSecretKey is needed for cross-validation API calls
     // inside the webhook handler (verifying events against Anchor's API).
     secrets: [
-        anchorWebhookSecret,
-        anchorWebhookSecretSecondary,
-        getanchorSecretKey,
-        smtpHost,
-        smtpUser,
-        smtpPass,
+      anchorWebhookSecret,
+      anchorWebhookSecretSecondary,
+      getanchorSecretKey,
+      smtpHost,
+      smtpUser,
+      smtpPass,
     ],
   },
   app,
@@ -6077,7 +7287,10 @@ const findEntityRef = async (customerId) => {
   ]);
 
   if (!businessSnap.empty)
-    return admin.firestore().collection("businesses").doc(businessSnap.docs[0].id);
+    return admin
+      .firestore()
+      .collection("businesses")
+      .doc(businessSnap.docs[0].id);
 
   if (!userSnap.empty)
     return admin.firestore().collection("users").doc(userSnap.docs[0].id);
@@ -6142,7 +7355,9 @@ exports.sendAdminLoginEmail = onCall(
 
     const { ipAddress, userAgent } = request.data || {};
     const name = adminData.name || to.split("@")[0] || "Admin";
-    const loggedAt = new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos" });
+    const loggedAt = new Date().toLocaleString("en-NG", {
+      timeZone: "Africa/Lagos",
+    });
 
     await sendNotifyEmail({
       to,
@@ -6188,7 +7403,9 @@ exports.sendBrmLoginEmail = onCall(
 
     const { userAgent } = request.data || {};
     const name = brmData.full_name || brmData.first_name || "BRM Agent";
-    const loggedAt = new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos" });
+    const loggedAt = new Date().toLocaleString("en-NG", {
+      timeZone: "Africa/Lagos",
+    });
 
     await sendNotifyEmail({
       to,
@@ -6223,17 +7440,14 @@ exports.sendBrmWelcomeEmail = onCall(
 
     const callerDoc = await db.collection("admins").doc(request.auth.uid).get();
     if (!callerDoc.exists || callerDoc.data()?.role !== "admin") {
-      throw new HttpsError("permission-denied", "Only admins can send BRM welcome emails.");
+      throw new HttpsError(
+        "permission-denied",
+        "Only admins can send BRM welcome emails.",
+      );
     }
 
-    const {
-      email,
-      firstName,
-      lastName,
-      password,
-      referralCode,
-      loginUrl,
-    } = request.data || {};
+    const { email, firstName, lastName, password, referralCode, loginUrl } =
+      request.data || {};
 
     if (!email || !firstName || !lastName || !password || !referralCode) {
       throw new HttpsError(
@@ -6280,17 +7494,23 @@ exports.getSuperAgentProgramSettings = onCall(async (request) => {
 
 exports.updateSuperAgentProgramSettings = onCall(async (request) => {
   const adminUid = await requireAdminCaller(request);
-  const {
-    perNipTransferAmount,
-    verifiedBusinessBonusAmount,
-    starThresholds,
-  } = request.data || {};
+  const { perNipTransferAmount, verifiedBusinessBonusAmount, starThresholds } =
+    request.data || {};
 
   if (typeof perNipTransferAmount !== "number" || perNipTransferAmount < 0) {
-    throw new HttpsError("invalid-argument", "perNipTransferAmount must be a non-negative number.");
+    throw new HttpsError(
+      "invalid-argument",
+      "perNipTransferAmount must be a non-negative number.",
+    );
   }
-  if (typeof verifiedBusinessBonusAmount !== "number" || verifiedBusinessBonusAmount < 0) {
-    throw new HttpsError("invalid-argument", "verifiedBusinessBonusAmount must be a non-negative number.");
+  if (
+    typeof verifiedBusinessBonusAmount !== "number" ||
+    verifiedBusinessBonusAmount < 0
+  ) {
+    throw new HttpsError(
+      "invalid-argument",
+      "verifiedBusinessBonusAmount must be a non-negative number.",
+    );
   }
   if (!starThresholds || typeof starThresholds !== "object") {
     throw new HttpsError("invalid-argument", "starThresholds is required.");
@@ -6301,18 +7521,24 @@ exports.updateSuperAgentProgramSettings = onCall(async (request) => {
     const raw = starThresholds[i] ?? starThresholds[String(i)];
     const value = Number(raw);
     if (Number.isNaN(value) || value < 0) {
-      throw new HttpsError("invalid-argument", `starThresholds.${i} must be a non-negative number.`);
+      throw new HttpsError(
+        "invalid-argument",
+        `starThresholds.${i} must be a non-negative number.`,
+      );
     }
     normalizedThresholds[i] = value;
   }
 
-  await db.collection("settings").doc("superAgentProgram").set({
-    perNipTransferAmount,
-    verifiedBusinessBonusAmount,
-    starThresholds: normalizedThresholds,
-    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    updatedBy: adminUid,
-  }, { merge: true });
+  await db.collection("settings").doc("superAgentProgram").set(
+    {
+      perNipTransferAmount,
+      verifiedBusinessBonusAmount,
+      starThresholds: normalizedThresholds,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedBy: adminUid,
+    },
+    { merge: true },
+  );
 
   return { success: true };
 });
@@ -6324,7 +7550,10 @@ exports.setBusinessSuperAgentStatus = onCall(
     const { businessId, isSuperAgent } = request.data || {};
 
     if (!businessId || typeof isSuperAgent !== "boolean") {
-      throw new HttpsError("invalid-argument", "businessId and boolean isSuperAgent are required.");
+      throw new HttpsError(
+        "invalid-argument",
+        "businessId and boolean isSuperAgent are required.",
+      );
     }
 
     const businessRef = db.collection("businesses").doc(String(businessId));
@@ -6343,23 +7572,34 @@ exports.setBusinessSuperAgentStatus = onCall(
     if (isSuperAgent && !data.superAgentReferralCode) {
       const code = await generateBusinessSuperAgentCode();
       updates.superAgentReferralCode = code;
-      updates.superAgentEnabledAt = admin.firestore.FieldValue.serverTimestamp();
-      updates.superAgentTotalEarnings = Number(data.superAgentTotalEarnings || 0);
-      updates.superAgentAvailableEarnings = Number(data.superAgentAvailableEarnings || 0);
+      updates.superAgentEnabledAt =
+        admin.firestore.FieldValue.serverTimestamp();
+      updates.superAgentTotalEarnings = Number(
+        data.superAgentTotalEarnings || 0,
+      );
+      updates.superAgentAvailableEarnings = Number(
+        data.superAgentAvailableEarnings || 0,
+      );
       updates.superAgentStars = Number(data.superAgentStars || 0);
     }
 
     if (!isSuperAgent) {
-      updates.superAgentDisabledAt = admin.firestore.FieldValue.serverTimestamp();
+      updates.superAgentDisabledAt =
+        admin.firestore.FieldValue.serverTimestamp();
     }
 
     await businessRef.set(updates, { merge: true });
 
     if (isSuperAgent) {
-      const to = String(data.businessEmail || data.email || "").trim().toLowerCase();
+      const to = String(data.businessEmail || data.email || "")
+        .trim()
+        .toLowerCase();
       if (to) {
         const name = String(data.businessName || "Business Owner").trim();
-        const referralCode = updates.superAgentReferralCode || data.superAgentReferralCode || "N/A";
+        const referralCode =
+          updates.superAgentReferralCode ||
+          data.superAgentReferralCode ||
+          "N/A";
         await sendNotifyEmail({
           to,
           subject: "You are now a PadiPay Super Agent",
@@ -6373,7 +7613,8 @@ exports.setBusinessSuperAgentStatus = onCall(
       success: true,
       businessId,
       isSuperAgent,
-      superAgentReferralCode: updates.superAgentReferralCode || data.superAgentReferralCode || null,
+      superAgentReferralCode:
+        updates.superAgentReferralCode || data.superAgentReferralCode || null,
     };
   },
 );
@@ -6385,20 +7626,31 @@ exports.sendSuperAgentLoginEmail = onCall(
       throw new HttpsError("unauthenticated", "Authentication is required.");
     }
 
-    const agentDoc = await db.collection("superAgents").doc(request.auth.uid).get();
+    const agentDoc = await db
+      .collection("superAgents")
+      .doc(request.auth.uid)
+      .get();
     if (!agentDoc.exists) {
-      throw new HttpsError("permission-denied", "Super Agent profile not found.");
+      throw new HttpsError(
+        "permission-denied",
+        "Super Agent profile not found.",
+      );
     }
 
     const agentData = agentDoc.data() || {};
     const to = String(agentData.email || "").trim();
     if (!to) {
-      throw new HttpsError("failed-precondition", "Super Agent email is missing.");
+      throw new HttpsError(
+        "failed-precondition",
+        "Super Agent email is missing.",
+      );
     }
 
     const { userAgent } = request.data || {};
     const name = agentData.full_name || agentData.first_name || "Super Agent";
-    const loggedAt = new Date().toLocaleString("en-NG", { timeZone: "Africa/Lagos" });
+    const loggedAt = new Date().toLocaleString("en-NG", {
+      timeZone: "Africa/Lagos",
+    });
 
     await sendNotifyEmail({
       to,
@@ -6431,10 +7683,14 @@ exports.sendSuperAgentWelcomeEmail = onCall(
 
     const callerDoc = await db.collection("admins").doc(request.auth.uid).get();
     if (!callerDoc.exists || callerDoc.data()?.role !== "admin") {
-      throw new HttpsError("permission-denied", "Only admins can send Super Agent welcome emails.");
+      throw new HttpsError(
+        "permission-denied",
+        "Only admins can send Super Agent welcome emails.",
+      );
     }
 
-    const { email, firstName, lastName, password, referralCode, loginUrl } = request.data || {};
+    const { email, firstName, lastName, password, referralCode, loginUrl } =
+      request.data || {};
 
     if (!email || !firstName || !lastName || !password || !referralCode) {
       throw new HttpsError(
@@ -6504,19 +7760,25 @@ exports.safehavenGetServiceCategories = onCallLogged(
     const lookup = keywords[category] || [category];
 
     const service = services.find((item) => {
-      const haystack = `${item?.name || ""} ${item?.identifier || ""}`.toLowerCase();
+      const haystack =
+        `${item?.name || ""} ${item?.identifier || ""}`.toLowerCase();
       return lookup.some((word) => haystack.includes(word));
     });
 
     if (!service?._id) {
-      throw new HttpsError("not-found", `No Safehaven service found for ${category}`);
+      throw new HttpsError(
+        "not-found",
+        `No Safehaven service found for ${category}`,
+      );
     }
 
     const categoriesResp = await safehavenRequest({
       path: `/vas/service/${encodeURIComponent(service._id)}/service-categories`,
       method: "GET",
     });
-    const billers = Array.isArray(categoriesResp.data) ? categoriesResp.data : [];
+    const billers = Array.isArray(categoriesResp.data)
+      ? categoriesResp.data
+      : [];
 
     return {
       data: billers.map((biller) => ({
@@ -6688,7 +7950,7 @@ exports.fetchCustomer = onCall(
     ]);
 
     const customerId = data.data.customerId.trim();
-    
+
     const url = `${BASE_URL}/customers/${encodeURIComponent(customerId)}`;
 
     const response = await makeApiRequest({ url, method: "GET", secretKey });
@@ -6720,7 +7982,7 @@ exports.fetchCustomerVirtualAccount = onCall(
     ]);
 
     const customerId = data.data.customerId.trim();
-    
+
     const url = `${BASE_URL}/customers/${encodeURIComponent(customerId)}?include=DepositAccount`;
 
     const response = await makeApiRequest({ url, method: "GET", secretKey });
@@ -6751,7 +8013,7 @@ exports.fetchCustomerAccount = onCall(
     ]);
 
     const accountId = data.data.accountId.trim();
-    
+
     const url = `${BASE_URL}/accounts/${encodeURIComponent(accountId)}`;
 
     return makeApiRequest({ url, method: "GET", secretKey });
@@ -6765,7 +8027,10 @@ exports.safehavenVerifyVas = onCallLogged(
     await ensureVerifiedOrStandUser(data.auth);
     validateData(data.data, [
       { key: "serviceCategoryId", message: "Service category ID is required" },
-      { key: "entityNumber", message: "Entity number (meter/card number) is required" },
+      {
+        key: "entityNumber",
+        message: "Entity number (meter/card number) is required",
+      },
     ]);
 
     const resp = await safehavenRequest({
@@ -6788,7 +8053,8 @@ exports.safehavenPurchaseVas = onCallLogged(
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
     const uid = data.auth?.uid;
-    if (!uid) throw new HttpsError("unauthenticated", "User is not authenticated");
+    if (!uid)
+      throw new HttpsError("unauthenticated", "User is not authenticated");
 
     validateData(data.data, [
       {
@@ -6810,9 +8076,16 @@ exports.safehavenPurchaseVas = onCallLogged(
     const accountId = data.data.accountId.trim();
     const amount = data.data.amount;
     const reference = data.data.reference.trim();
-    const serviceCategoryRaw = (data.data.provider || data.data.productSlug || "").trim();
+    const serviceCategoryRaw = (
+      data.data.provider ||
+      data.data.productSlug ||
+      ""
+    ).trim();
     if (!serviceCategoryRaw) {
-      throw new HttpsError("invalid-argument", "Provider or product slug is required");
+      throw new HttpsError(
+        "invalid-argument",
+        "Provider or product slug is required",
+      );
     }
 
     let serviceCategoryId = serviceCategoryRaw;
@@ -6822,7 +8095,9 @@ exports.safehavenPurchaseVas = onCallLogged(
         path: "/vas/services",
         method: "GET",
       });
-      const services = Array.isArray(servicesResp.data) ? servicesResp.data : [];
+      const services = Array.isArray(servicesResp.data)
+        ? servicesResp.data
+        : [];
 
       const typeToServiceKeywords = {
         Airtime: ["airtime"],
@@ -6833,7 +8108,8 @@ exports.safehavenPurchaseVas = onCallLogged(
 
       const lookup = typeToServiceKeywords[type] || [type.toLowerCase()];
       const service = services.find((item) => {
-        const haystack = `${item?.name || ""} ${item?.identifier || ""}`.toLowerCase();
+        const haystack =
+          `${item?.name || ""} ${item?.identifier || ""}`.toLowerCase();
         return lookup.some((word) => haystack.includes(word));
       });
 
@@ -6842,17 +8118,21 @@ exports.safehavenPurchaseVas = onCallLogged(
           path: `/vas/service/${encodeURIComponent(service._id)}/service-categories`,
           method: "GET",
         });
-        const categories = Array.isArray(categoriesResp.data) ? categoriesResp.data : [];
+        const categories = Array.isArray(categoriesResp.data)
+          ? categoriesResp.data
+          : [];
         const target = serviceCategoryRaw.toLowerCase();
 
         const matchedCategory = categories.find((item) => {
           const idText = String(item?._id || "").toLowerCase();
           const identifierText = String(item?.identifier || "").toLowerCase();
           const nameText = String(item?.name || "").toLowerCase();
-          return idText === target ||
+          return (
+            idText === target ||
             identifierText === target ||
             nameText === target ||
-            nameText.includes(target);
+            nameText.includes(target)
+          );
         });
 
         if (matchedCategory?._id) {
@@ -6863,12 +8143,16 @@ exports.safehavenPurchaseVas = onCallLogged(
 
     const acctInfo = await _getSafehavenAccountForUser(uid);
     let debitAccountNumber = acctInfo?.accountNumber || "";
-    if (!debitAccountNumber || (accountId && acctInfo?.accountId && acctInfo.accountId !== accountId)) {
+    if (
+      !debitAccountNumber ||
+      (accountId && acctInfo?.accountId && acctInfo.accountId !== accountId)
+    ) {
       const accountResp = await safehavenRequest({
         path: `/accounts/${encodeURIComponent(accountId)}`,
         method: "GET",
       });
-      debitAccountNumber = accountResp?.data?.accountNumber || debitAccountNumber;
+      debitAccountNumber =
+        accountResp?.data?.accountNumber || debitAccountNumber;
     }
     if (!debitAccountNumber) {
       throw new HttpsError("failed-precondition", "Virtual account not set up");
@@ -6908,7 +8192,10 @@ exports.safehavenPurchaseVas = onCallLogged(
       case "Electricity":
         validateData(data.data, [
           { key: "meterAccountNumber", message: "Meter number is required" },
-          { key: "vendType", message: "Vend type is required (call safehavenVerifyVas first)" },
+          {
+            key: "vendType",
+            message: "Vend type is required (call safehavenVerifyVas first)",
+          },
         ]);
         safehavenPath = "/vas/pay/utility";
         requestPayload = {
@@ -6949,7 +8236,8 @@ exports.safehavenPurchaseVas = onCallLogged(
     const baseAttributes = {
       amount,
       reference,
-      status: bill.status || (resp?.responseCode === "00" ? "successful" : "PENDING"),
+      status:
+        bill.status || (resp?.responseCode === "00" ? "successful" : "PENDING"),
       channel: requestPayload.channel || "WEB",
       providerReference: bill.reference || bill.id || reference,
       receiver: bill.receiver || null,
@@ -6968,7 +8256,8 @@ exports.safehavenPurchaseVas = onCallLogged(
       baseAttributes.phoneNumber = data.data.phoneNumber?.trim() || null;
     }
     if (type === "Television") {
-      baseAttributes.smartCardNumber = data.data.smartCardNumber?.trim() || null;
+      baseAttributes.smartCardNumber =
+        data.data.smartCardNumber?.trim() || null;
       baseAttributes.detail.smartCardNumber = baseAttributes.smartCardNumber;
     }
     if (type === "Electricity") {
@@ -7663,7 +8952,7 @@ exports.dailyUpdateBanks = onSchedule(
     if (secretKey.length === 0) {
       throw new Error("Getanchor Secret Key is not set");
     }
-    
+
     const url = `${BASE_URL}/banks`;
     const response = await makeApiRequest({ url, method: "GET", secretKey });
     const banks = response.data;
@@ -8743,56 +10032,61 @@ exports.qoreidWebhook = onRequest(
 );
 // SECURITY: Internal service endpoint ? requires Bearer token auth using PADILOAN_API_SECRET.
 // Never expose this function to end-users or client apps; it returns raw financial account data.
-exports.findUserByBvn = onRequest({ secrets: [padiLoanApiSecret] }, async (req, res) => {
-  try {
-    if (req.method !== "POST") {
+exports.findUserByBvn = onRequest(
+  { secrets: [padiLoanApiSecret] },
+  async (req, res) => {
+    try {
+      if (req.method !== "POST") {
+        return res
+          .status(405)
+          .json({ error: "method_not_allowed", message: "Use HTTP POST" });
+      }
+
+      // SECURITY: Validate Bearer token on every request. Use timing-safe string
+      // comparison is not needed here as Firebase Functions runs over HTTPS and
+      // the secret is never sent in the URL. The check is still server-side only.
+      const authHeader = req.headers.authorization;
+      const secret = padiLoanApiSecret.value();
+      if (!authHeader || authHeader !== `Bearer ${secret}`) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      const rawBvn = req.body && req.body.bvn;
+      const bvn = typeof rawBvn === "string" ? rawBvn.trim() : rawBvn;
+
+      if (!bvn) {
+        return res.status(400).json({
+          error: "invalid-argument",
+          message: "bvn is required in JSON body as 'bvn'",
+        });
+      }
+
+      const usersRef = db.collection("users");
+      const snapshot = await usersRef
+        .where("qoreIdData.verification.metadata.idNumber", "==", bvn)
+        .limit(1)
+        .get();
+
+      if (snapshot.empty) {
+        return res.status(404).json({
+          error: "not_found",
+          message: "No user found for provided BVN",
+        });
+      }
+
+      const doc = snapshot.docs[0];
+      const getAnchorData = doc.data().getAnchorData || null;
+
+      return res.status(200).json({ getAnchorData });
+    } catch (err) {
+      console.error("findUserByBvn error:", err);
+      const status = err?.httpStatus || 500;
       return res
-        .status(405)
-        .json({ error: "method_not_allowed", message: "Use HTTP POST" });
+        .status(status)
+        .json({ error: err.message || "internal_error" });
     }
-
-    // SECURITY: Validate Bearer token on every request. Use timing-safe string
-    // comparison is not needed here as Firebase Functions runs over HTTPS and
-    // the secret is never sent in the URL. The check is still server-side only.
-    const authHeader = req.headers.authorization;
-    const secret = padiLoanApiSecret.value();
-    if (!authHeader || authHeader !== `Bearer ${secret}`) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    const rawBvn = req.body && req.body.bvn;
-    const bvn = typeof rawBvn === "string" ? rawBvn.trim() : rawBvn;
-
-    if (!bvn) {
-      return res.status(400).json({
-        error: "invalid-argument",
-        message: "bvn is required in JSON body as 'bvn'",
-      });
-    }
-
-    const usersRef = db.collection("users");
-    const snapshot = await usersRef
-      .where("qoreIdData.verification.metadata.idNumber", "==", bvn)
-      .limit(1)
-      .get();
-
-    if (snapshot.empty) {
-      return res.status(404).json({
-        error: "not_found",
-        message: "No user found for provided BVN",
-      });
-    }
-
-    const doc = snapshot.docs[0];
-    const getAnchorData = doc.data().getAnchorData || null;
-
-    return res.status(200).json({ getAnchorData });
-  } catch (err) {
-    console.error("findUserByBvn error:", err);
-    const status = err?.httpStatus || 500;
-    return res.status(status).json({ error: err.message || "internal_error" });
-  }
-});
+  },
+);
 // Fetch all customers (supports optional query params in `data.data`)
 exports.fetchAllCustomers = onCall(
   { secrets: [getanchorSecretKey] },
@@ -9442,7 +10736,8 @@ exports.synthesizeNeuralSpeech = onCall(async (request) => {
     );
   }
 
-  const style = String(voiceStyle || "female").toLowerCase() === "male" ? "male" : "female";
+  const style =
+    String(voiceStyle || "female").toLowerCase() === "male" ? "male" : "female";
   const language =
     String(voiceLanguage || "english").toLowerCase() === "pidgin"
       ? "pidgin"
@@ -9682,7 +10977,10 @@ exports.verifyEmailOTP = onCall(async (request) => {
   const attempts = (data.attempts || 0) + 1;
   if (attempts > MAX_ATTEMPTS) {
     await docRef.update({ used: true }); // lock it out permanently
-    throw new HttpsError("resource-exhausted", "Too many incorrect attempts. Request a new OTP.");
+    throw new HttpsError(
+      "resource-exhausted",
+      "Too many incorrect attempts. Request a new OTP.",
+    );
   }
 
   if (data.code !== String(code)) {
@@ -9868,7 +11166,10 @@ exports.verifyPasswordResetOTP = onCall(async (request) => {
   const attempts = (data.attempts || 0) + 1;
   if (attempts > MAX_ATTEMPTS) {
     await docRef.update({ used: true });
-    throw new HttpsError("resource-exhausted", "Too many incorrect attempts. Request a new OTP.");
+    throw new HttpsError(
+      "resource-exhausted",
+      "Too many incorrect attempts. Request a new OTP.",
+    );
   }
 
   if (data.code !== String(code)) {
@@ -9977,7 +11278,6 @@ exports.resetPasswordWithOTP = onCall(async (request) => {
 
 // ==================== END PASSWORD RESET OTP FUNCTIONS ====================
 
-
 // ==================== ATM TRANSACTION RECONCILIATION ====================
 // Safe Haven MFB Kimono ? card transaction lookup by RRN.
 // Auth: RS256 client assertion ? OAuth2 access_token (cached per instance).
@@ -9988,13 +11288,19 @@ let _safehavenApiBase = null;
 let _safehavenAtmTokenCacheKey = null;
 
 function _base64UrlEncode(buf) {
-  return buf.toString("base64")
+  return buf
+    .toString("base64")
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
     .replace(/=/g, "");
 }
 
-async function _getSafehavenAccessToken(clientId, privateKeyPem, companyUrl, apiBase) {
+async function _getSafehavenAccessToken(
+  clientId,
+  privateKeyPem,
+  companyUrl,
+  apiBase,
+) {
   const now = Math.floor(Date.now() / 1000);
   const cacheKey = `${apiBase}|${clientId}`;
 
@@ -10006,74 +11312,104 @@ async function _getSafehavenAccessToken(clientId, privateKeyPem, companyUrl, api
     _safehavenAtmTokenExpiresAt > now + 60
   ) {
     console.log("[SafeHaven] Reusing cached access token");
-    return {accessToken: _safehavenToken, apiBase: _safehavenApiBase};
+    return { accessToken: _safehavenToken, apiBase: _safehavenApiBase };
   }
 
-  console.log("[SafeHaven] Generating new client assertion for clientId=", clientId);
+  console.log(
+    "[SafeHaven] Generating new client assertion for clientId=",
+    clientId,
+  );
 
-  const authBases = [apiBase].filter((v) => typeof v === "string" && v.length > 0);
+  const authBases = [apiBase].filter(
+    (v) => typeof v === "string" && v.length > 0,
+  );
 
   const attempts = [];
 
   for (const apiBase of authBases) {
     try {
       // Build RS256 JWT client assertion for the current auth base.
-      const header = _base64UrlEncode(Buffer.from(JSON.stringify({alg: "RS256", typ: "JWT"})));
-      const payload = _base64UrlEncode(Buffer.from(JSON.stringify({
-        iss: companyUrl,
-        sub: clientId,
-        aud: apiBase,
-        iat: now,
-        exp: now + 3600,
-      })));
+      const header = _base64UrlEncode(
+        Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })),
+      );
+      const payload = _base64UrlEncode(
+        Buffer.from(
+          JSON.stringify({
+            iss: companyUrl,
+            sub: clientId,
+            aud: apiBase,
+            iat: now,
+            exp: now + 3600,
+          }),
+        ),
+      );
 
       const signingInput = `${header}.${payload}`;
       const signer = crypto.createSign("RSA-SHA256");
       signer.update(signingInput);
       signer.end();
-      const signature = _base64UrlEncode(signer.sign({key: privateKeyPem, format: "pem"}));
+      const signature = _base64UrlEncode(
+        signer.sign({ key: privateKeyPem, format: "pem" }),
+      );
       const clientAssertion = `${signingInput}.${signature}`;
 
-      console.log("[SafeHaven] Exchanging client assertion for access token on", apiBase);
+      console.log(
+        "[SafeHaven] Exchanging client assertion for access token on",
+        apiBase,
+      );
 
       // OAuth 2.0 requires application/x-www-form-urlencoded.
       const tokenRes = await fetch(`${apiBase}/oauth2/token`, {
         method: "POST",
-        headers: {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Accept: "application/json",
+        },
         body: new URLSearchParams({
           grant_type: "client_credentials",
           client_id: clientId,
           client_assertion: clientAssertion,
-          client_assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+          client_assertion_type:
+            "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
         }).toString(),
       });
 
       const tokenBody = await tokenRes.json();
       console.log(
-        "[SafeHaven] Token exchange base=" + apiBase +
-        " HTTP=" + tokenRes.status +
-        " body=" + JSON.stringify(tokenBody),
+        "[SafeHaven] Token exchange base=" +
+          apiBase +
+          " HTTP=" +
+          tokenRes.status +
+          " body=" +
+          JSON.stringify(tokenBody),
       );
 
       if (!tokenRes.ok || !tokenBody.access_token) {
-        attempts.push(`base=${apiBase} HTTP ${tokenRes.status} ${JSON.stringify(tokenBody)}`);
+        attempts.push(
+          `base=${apiBase} HTTP ${tokenRes.status} ${JSON.stringify(tokenBody)}`,
+        );
         continue;
       }
 
-      const expiresIn = typeof tokenBody.expires_in === "number" ? tokenBody.expires_in : 3600;
+      const expiresIn =
+        typeof tokenBody.expires_in === "number" ? tokenBody.expires_in : 3600;
       _safehavenToken = tokenBody.access_token;
       _safehavenAtmTokenExpiresAt = now + expiresIn;
       _safehavenApiBase = apiBase;
       _safehavenAtmTokenCacheKey = cacheKey;
 
-      console.log(`[SafeHaven] Access token obtained from ${apiBase}, expires in ${expiresIn}s`);
-      return {accessToken: _safehavenToken, apiBase: _safehavenApiBase};
+      console.log(
+        `[SafeHaven] Access token obtained from ${apiBase}, expires in ${expiresIn}s`,
+      );
+      return { accessToken: _safehavenToken, apiBase: _safehavenApiBase };
     } catch (err) {
       attempts.push(`base=${apiBase} error=${err.message || String(err)}`);
     }
   }
 
-  throw new Error(`Safe Haven token exchange failed. Attempts: ${attempts.join(" | ")}`);
+  throw new Error(
+    `Safe Haven token exchange failed. Attempts: ${attempts.join(" | ")}`,
+  );
 }
 
 exports.reconcileAtmTransaction = onCall(
@@ -10082,7 +11418,9 @@ exports.reconcileAtmTransaction = onCall(
     await ensureVerifiedOrStandUser(data.auth);
 
     const { rrn, transactionDocId } = data.data;
-    const pendingFailAfterMinutes = Number(data?.data?.pendingFailAfterMinutes || 10);
+    const pendingFailAfterMinutes = Number(
+      data?.data?.pendingFailAfterMinutes || 10,
+    );
     if (!rrn || typeof rrn !== "string" || rrn.trim().length === 0) {
       throw new HttpsError("invalid-argument", "RRN is required");
     }
@@ -10094,7 +11432,10 @@ exports.reconcileAtmTransaction = onCall(
     const preferredApiBase = safehavenConfig.baseUrl;
 
     if (!clientId || !privateKey || !companyUrl) {
-      throw new HttpsError("internal", "Safe Haven credentials are not configured");
+      throw new HttpsError(
+        "internal",
+        "Safe Haven credentials are not configured",
+      );
     }
 
     // Obtain a valid access token
@@ -10111,7 +11452,10 @@ exports.reconcileAtmTransaction = onCall(
       apiBase = authResult.apiBase;
     } catch (authErr) {
       console.error("[Reconcile] Auth error:", authErr);
-      throw new HttpsError("internal", `Safe Haven auth failed: ${authErr.message}`);
+      throw new HttpsError(
+        "internal",
+        `Safe Haven auth failed: ${authErr.message}`,
+      );
     }
 
     const url =
@@ -10125,16 +11469,22 @@ exports.reconcileAtmTransaction = onCall(
       const response = await fetch(url, {
         method: "GET",
         headers: {
-          "Authorization": `Bearer ${accessToken}`,
+          Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json",
-          "Accept": "application/json",
+          Accept: "application/json",
         },
       });
       raw = await response.json();
-      console.log(`[Reconcile] RRN=${rrn} HTTP=${response.status} raw:`, JSON.stringify(raw));
+      console.log(
+        `[Reconcile] RRN=${rrn} HTTP=${response.status} raw:`,
+        JSON.stringify(raw),
+      );
     } catch (fetchErr) {
       console.error(`[Reconcile] Fetch error for RRN=${rrn}:`, fetchErr);
-      throw new HttpsError("internal", `Failed to reach Safe Haven: ${fetchErr.message}`);
+      throw new HttpsError(
+        "internal",
+        `Failed to reach Safe Haven: ${fetchErr.message}`,
+      );
     }
 
     // Parse status
@@ -10145,7 +11495,7 @@ exports.reconcileAtmTransaction = onCall(
 
     try {
       const record = Array.isArray(raw?.data) ? raw.data[0] : raw?.data;
-      responseCode    = record?.responseCode ?? record?.field39 ?? null;
+      responseCode = record?.responseCode ?? record?.field39 ?? null;
       safeHavenStatus = record?.status ?? null;
 
       if (responseCode === "00" || safeHavenStatus === "Successful") {
@@ -10156,12 +11506,15 @@ exports.reconcileAtmTransaction = onCall(
         reconciledStatus = "failed";
       }
     } catch (parseErr) {
-      console.warn(`[Reconcile] Could not parse Safe Haven response for RRN=${rrn}:`, parseErr);
+      console.warn(
+        `[Reconcile] Could not parse Safe Haven response for RRN=${rrn}:`,
+        parseErr,
+      );
     }
 
     console.log(
       `[Reconcile] RRN=${rrn} resolved status=${reconciledStatus}` +
-      ` responseCode=${responseCode} safeHavenStatus=${safeHavenStatus}`
+        ` responseCode=${responseCode} safeHavenStatus=${safeHavenStatus}`,
     );
 
     let txRef = null;
@@ -10176,7 +11529,10 @@ exports.reconcileAtmTransaction = onCall(
           previousStatus = txData?.status || null;
         }
       } catch (txReadErr) {
-        console.error(`[Reconcile] Failed to read transaction doc ${transactionDocId}:`, txReadErr);
+        console.error(
+          `[Reconcile] Failed to read transaction doc ${transactionDocId}:`,
+          txReadErr,
+        );
       }
     }
 
@@ -10188,11 +11544,12 @@ exports.reconcileAtmTransaction = onCall(
       reconciledStatus === "pending" &&
       previousStatus === "pending"
     ) {
-      const createdMs = typeof txData?.timestamp?.toMillis === "function"
-        ? txData.timestamp.toMillis()
-        : typeof txData?.createdAtFirestore?.toMillis === "function"
-          ? txData.createdAtFirestore.toMillis()
-          : 0;
+      const createdMs =
+        typeof txData?.timestamp?.toMillis === "function"
+          ? txData.timestamp.toMillis()
+          : typeof txData?.createdAtFirestore?.toMillis === "function"
+            ? txData.createdAtFirestore.toMillis()
+            : 0;
 
       if (createdMs > 0) {
         const ageMs = Date.now() - createdMs;
@@ -10218,9 +11575,14 @@ exports.reconcileAtmTransaction = onCall(
           reconciliationSafeHavenStatus: safeHavenStatus,
           reconciliationRaw: raw,
         });
-        console.log(`[Reconcile] Updated doc ${transactionDocId} => ${reconciledStatus}`);
+        console.log(
+          `[Reconcile] Updated doc ${transactionDocId} => ${reconciledStatus}`,
+        );
       } catch (updateErr) {
-        console.error(`[Reconcile] Failed to update Firestore doc ${transactionDocId}:`, updateErr);
+        console.error(
+          `[Reconcile] Failed to update Firestore doc ${transactionDocId}:`,
+          updateErr,
+        );
       }
     }
 
@@ -10236,18 +11598,24 @@ exports.reconcileAtmTransaction = onCall(
     ) {
       const userId = txData.userId;
       const amount = Number(txData?.amount || 0);
-      const formattedAmount = Number.isFinite(amount) ? amount.toFixed(2) : "0.00";
-      const statusTitle = reconciledStatus === "success"
-        ? "ATM Payment Confirmed"
-        : "ATM Payment Update";
-      const statusBody = reconciledStatus === "success"
-        ? `Your ATM card payment of NGN ${formattedAmount} has been confirmed successfully.`
-        : `Your ATM card payment of NGN ${formattedAmount} could not be confirmed and is marked as failed.`;
+      const formattedAmount = Number.isFinite(amount)
+        ? amount.toFixed(2)
+        : "0.00";
+      const statusTitle =
+        reconciledStatus === "success"
+          ? "ATM Payment Confirmed"
+          : "ATM Payment Update";
+      const statusBody =
+        reconciledStatus === "success"
+          ? `Your ATM card payment of NGN ${formattedAmount} has been confirmed successfully.`
+          : `Your ATM card payment of NGN ${formattedAmount} could not be confirmed and is marked as failed.`;
 
       try {
         const userRef = db.collection("users").doc(userId);
         const userSnap = await userRef.get();
-        const deviceToken = userSnap.exists ? userSnap.data()?.deviceToken : null;
+        const deviceToken = userSnap.exists
+          ? userSnap.data()?.deviceToken
+          : null;
 
         if (deviceToken) {
           await admin.messaging().send({
@@ -10263,17 +11631,26 @@ exports.reconcileAtmTransaction = onCall(
         await saveNotification(userId, {
           title: statusTitle,
           body: `${statusBody} (RRN: ${rrn.trim()})`,
-          type: reconciledStatus === "success" ? "atm_reconcile_success" : "atm_reconcile_failed",
+          type:
+            reconciledStatus === "success"
+              ? "atm_reconcile_success"
+              : "atm_reconcile_failed",
           amount,
         });
 
         await txRef.update({
-          reconciliationNotificationSentAt: admin.firestore.FieldValue.serverTimestamp(),
+          reconciliationNotificationSentAt:
+            admin.firestore.FieldValue.serverTimestamp(),
           reconciliationNotifiedStatus: reconciledStatus,
         });
-        console.log(`[Reconcile] Notification sent for doc ${transactionDocId} => ${reconciledStatus}`);
+        console.log(
+          `[Reconcile] Notification sent for doc ${transactionDocId} => ${reconciledStatus}`,
+        );
       } catch (notifyErr) {
-        console.error(`[Reconcile] Notification failed for doc ${transactionDocId}:`, notifyErr);
+        console.error(
+          `[Reconcile] Notification failed for doc ${transactionDocId}:`,
+          notifyErr,
+        );
       }
     }
 
@@ -10297,7 +11674,9 @@ const _normalizeStatementItems = (raw) => {
 
 const _findStatementMatch = (pendingTx, statementItems, usedIds) => {
   const txAmount = Number(pendingTx?.amount || 0);
-  const txTime = _toMillis(pendingTx?.timestamp || pendingTx?.createdAtFirestore);
+  const txTime = _toMillis(
+    pendingTx?.timestamp || pendingTx?.createdAtFirestore,
+  );
   if (!Number.isFinite(txAmount) || txAmount <= 0 || !txTime) return null;
 
   let best = null;
@@ -10311,7 +11690,9 @@ const _findStatementMatch = (pendingTx, statementItems, usedIds) => {
     if (!Number.isFinite(amount) || amount <= 0) continue;
     if (Math.abs(amount - txAmount) > 0.01) continue;
 
-    const stTime = _toMillis(item?.transactionDate || item?.valueDate || item?.createdAt);
+    const stTime = _toMillis(
+      item?.transactionDate || item?.valueDate || item?.createdAt,
+    );
     if (!stTime) continue;
 
     const diffMs = Math.abs(stTime - txTime);
@@ -10328,7 +11709,10 @@ const _findStatementMatch = (pendingTx, statementItems, usedIds) => {
 };
 
 exports.backfillAtmTransactionsFromStatement = onCall(
-  { secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl], timeoutSeconds: 300 },
+  {
+    secrets: [safehavenClientId, safehavenPrivateKey, safehavenCompanyUrl],
+    timeoutSeconds: 300,
+  },
   async (data, context) => {
     await ensureVerifiedOrStandUser(data.auth);
 
@@ -10344,7 +11728,10 @@ exports.backfillAtmTransactionsFromStatement = onCall(
     const companyUrl = safehavenConfig.companyUrl;
     const preferredApiBase = safehavenConfig.baseUrl;
     if (!clientId || !privateKey || !companyUrl) {
-      throw new HttpsError("internal", "Safe Haven credentials are not configured");
+      throw new HttpsError(
+        "internal",
+        "Safe Haven credentials are not configured",
+      );
     }
 
     let accessToken;
@@ -10359,7 +11746,10 @@ exports.backfillAtmTransactionsFromStatement = onCall(
       accessToken = authResult.accessToken;
       apiBase = authResult.apiBase;
     } catch (authErr) {
-      throw new HttpsError("internal", `Safe Haven auth failed: ${authErr.message}`);
+      throw new HttpsError(
+        "internal",
+        `Safe Haven auth failed: ${authErr.message}`,
+      );
     }
 
     // 1) Resolve default account ID via /accounts
@@ -10368,25 +11758,31 @@ exports.backfillAtmTransactionsFromStatement = onCall(
       const accountsRes = await fetch(`${apiBase}/accounts?page=0&limit=25`, {
         method: "GET",
         headers: {
-          "Authorization": `Bearer ${accessToken}`,
+          Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json",
-          "Accept": "application/json",
+          Accept: "application/json",
         },
       });
       const accountsRaw = await accountsRes.json();
       const accounts = Array.isArray(accountsRaw?.data) ? accountsRaw.data : [];
-      const preferred = accounts.find((a) => a?.isDefault === true) || accounts[0];
+      const preferred =
+        accounts.find((a) => a?.isDefault === true) || accounts[0];
       accountId = preferred?._id || null;
     } catch (e) {
       console.error("[Backfill] Failed to fetch accounts:", e);
     }
 
     if (!accountId) {
-      throw new HttpsError("failed-precondition", "Unable to resolve Safe Haven account ID from /accounts");
+      throw new HttpsError(
+        "failed-precondition",
+        "Unable to resolve Safe Haven account ID from /accounts",
+      );
     }
 
     // 2) Fetch account statement (try known URL shapes)
-    const from = new Date(Date.now() - Math.max(1, daysBack) * 24 * 60 * 60 * 1000).toISOString();
+    const from = new Date(
+      Date.now() - Math.max(1, daysBack) * 24 * 60 * 60 * 1000,
+    ).toISOString();
     const to = new Date().toISOString();
     const statementUrls = [
       `${apiBase}/accounts/${accountId}/statement?page=0&limit=100&fromDate=${encodeURIComponent(from)}&toDate=${encodeURIComponent(to)}`,
@@ -10401,9 +11797,9 @@ exports.backfillAtmTransactionsFromStatement = onCall(
         const res = await fetch(url, {
           method: "GET",
           headers: {
-            "Authorization": `Bearer ${accessToken}`,
+            Authorization: `Bearer ${accessToken}`,
             "Content-Type": "application/json",
-            "Accept": "application/json",
+            Accept: "application/json",
           },
         });
         const raw = await res.json();
@@ -10414,17 +11810,27 @@ exports.backfillAtmTransactionsFromStatement = onCall(
           break;
         }
       } catch (e) {
-        console.warn("[Backfill] Statement fetch failed for URL:", url, e?.message || e);
+        console.warn(
+          "[Backfill] Statement fetch failed for URL:",
+          url,
+          e?.message || e,
+        );
       }
     }
 
     if (!statementSourceUrl) {
-      throw new HttpsError("internal", "Unable to fetch account statement from known endpoints");
+      throw new HttpsError(
+        "internal",
+        "Unable to fetch account statement from known endpoints",
+      );
     }
 
     // 3) Reconcile pending ATM docs with statement items by amount + closest timestamp
-    const sinceTs = admin.firestore.Timestamp.fromMillis(Date.now() - Math.max(1, daysBack) * 24 * 60 * 60 * 1000);
-    const pendingSnap = await db.collection("transactions")
+    const sinceTs = admin.firestore.Timestamp.fromMillis(
+      Date.now() - Math.max(1, daysBack) * 24 * 60 * 60 * 1000,
+    );
+    const pendingSnap = await db
+      .collection("transactions")
       .where("userId", "==", userId)
       .where("type", "==", "atm_payment")
       .where("status", "==", "pending")
@@ -10462,7 +11868,10 @@ exports.backfillAtmTransactionsFromStatement = onCall(
           amount,
         });
       } catch (e) {
-        console.error(`[Backfill] Failed to reconcile pending tx ${doc.id}:`, e);
+        console.error(
+          `[Backfill] Failed to reconcile pending tx ${doc.id}:`,
+          e,
+        );
       }
     }
 
@@ -10473,7 +11882,8 @@ exports.backfillAtmTransactionsFromStatement = onCall(
         if (String(item?.type || "").toLowerCase() !== "credit") continue;
         if (!item?._id) continue;
 
-        const existing = await db.collection("transactions")
+        const existing = await db
+          .collection("transactions")
           .where("statementTransactionId", "==", item._id)
           .limit(1)
           .get();
@@ -10508,7 +11918,9 @@ exports.backfillAtmTransactionsFromStatement = onCall(
       }
     }
 
-    console.log(`[Backfill] accountId=${accountId} statementRows=${statementItems.length} reconciled=${reconciledCount} imported=${importedCount}`);
+    console.log(
+      `[Backfill] accountId=${accountId} statementRows=${statementItems.length} reconciled=${reconciledCount} imported=${importedCount}`,
+    );
 
     return {
       ok: true,
@@ -10544,13 +11956,15 @@ const _resolveSudoApiConfig = async (fallbackApiKey) => {
 
   if (now - _sudoKeyOverrideFetchedAt < _SUDO_KEY_CACHE_TTL_MS) {
     const apiKey = _sudoKeyOverrideCache || normalizedFallback;
-    const baseUrl = _sudoKeyOverrideCache ? SUDO_SANDBOX_BASE_URL : SUDO_BASE_URL;
+    const baseUrl = _sudoKeyOverrideCache
+      ? SUDO_SANDBOX_BASE_URL
+      : SUDO_BASE_URL;
     return { apiKey, baseUrl };
   }
 
   try {
     const doc = await db.collection("appConfig").doc("sudo").get();
-    const data = doc.exists ? (doc.data() || {}) : {};
+    const data = doc.exists ? doc.data() || {} : {};
     const override = String(
       data.secretKeyOverride || data.apiKeyOverride || "",
     ).trim();
@@ -10585,8 +11999,8 @@ const sudoRequest = async ({ url, method, apiKey, body }) => {
 
   const resolvedUrl = /^https?:\/\//i.test(normalizedUrl)
     ? normalizedUrl
-      .replace(SUDO_BASE_URL, resolvedBaseUrl)
-      .replace(SUDO_SANDBOX_BASE_URL, resolvedBaseUrl)
+        .replace(SUDO_BASE_URL, resolvedBaseUrl)
+        .replace(SUDO_SANDBOX_BASE_URL, resolvedBaseUrl)
     : `${resolvedBaseUrl}${normalizedUrl.startsWith("/") ? "" : "/"}${normalizedUrl}`;
 
   const headers = {
@@ -10622,96 +12036,104 @@ const sudoRequest = async ({ url, method, apiKey, body }) => {
 // ??? Customers ???
 
 // Create a Sudo customer
-exports.sudoCreateCustomer = onCall(
-  { secrets: [sudoApiKey] },
-  async (data) => {
-    await ensureVerifiedOrStandUser(data.auth);
-    const {
-      type, name, phoneNumber, status, emailAddress,
-      billingAddress, individual, company,
-    } = data.data;
+exports.sudoCreateCustomer = onCall({ secrets: [sudoApiKey] }, async (data) => {
+  await ensureVerifiedOrStandUser(data.auth);
+  const {
+    type,
+    name,
+    phoneNumber,
+    status,
+    emailAddress,
+    billingAddress,
+    individual,
+    company,
+  } = data.data;
 
-    if (!type || !name || !phoneNumber || !status || !billingAddress) {
+  if (!type || !name || !phoneNumber || !status || !billingAddress) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Missing required parameters: type, name, phoneNumber, status, billingAddress.",
+    );
+  }
+
+  const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
+  if (!apiKey)
+    throw new HttpsError("internal", "Sudo API key is not configured.");
+
+  const body = { type, name, phoneNumber, status, billingAddress };
+  if (emailAddress) body.emailAddress = emailAddress;
+  if (individual) body.individual = individual;
+  if (company) body.company = company;
+
+  try {
+    const response = await sudoRequest({
+      url: `${SUDO_BASE_URL}/customers`,
+      method: "POST",
+      apiKey,
+      body,
+    });
+
+    const json = await response.json();
+    console.log("Sudo createCustomer response:", JSON.stringify(json));
+    if (!response.ok) {
+      console.error("Sudo createCustomer error:", json);
       throw new HttpsError(
-        "invalid-argument",
-        "Missing required parameters: type, name, phoneNumber, status, billingAddress.",
+        "internal",
+        json.message || `HTTP ${response.status}`,
       );
     }
-
-    const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
-
-    const body = { type, name, phoneNumber, status, billingAddress };
-    if (emailAddress) body.emailAddress = emailAddress;
-    if (individual) body.individual = individual;
-    if (company) body.company = company;
-
-    try {
-      const response = await sudoRequest({
-        url: `${SUDO_BASE_URL}/customers`,
-        method: "POST",
-        apiKey,
-        body,
-      });
-
-      const json = await response.json();
-      console.log("Sudo createCustomer response:", JSON.stringify(json));
-      if (!response.ok) {
-        console.error("Sudo createCustomer error:", json);
-        throw new HttpsError("internal", json.message || `HTTP ${response.status}`);
-      }
-      return json;
-    } catch (err) {
-      if (err instanceof HttpsError) throw err;
-      console.error("Sudo createCustomer error:", err);
-      throw new HttpsError("internal", err.message);
-    }
-  },
-);
+    return json;
+  } catch (err) {
+    if (err instanceof HttpsError) throw err;
+    console.error("Sudo createCustomer error:", err);
+    throw new HttpsError("internal", err.message);
+  }
+});
 
 // Create a Sudo account
-exports.sudoCreateAccount = onCall(
-  { secrets: [sudoApiKey] },
-  async (data) => {
-    await ensureVerifiedOrStandUser(data.auth);
-    const { customerId, type, currency, accountType } = data.data;
+exports.sudoCreateAccount = onCall({ secrets: [sudoApiKey] }, async (data) => {
+  await ensureVerifiedOrStandUser(data.auth);
+  const { customerId, type, currency, accountType } = data.data;
 
-    if (!customerId) {
-      throw new HttpsError("invalid-argument", "customerId is required.");
+  if (!customerId) {
+    throw new HttpsError("invalid-argument", "customerId is required.");
+  }
+
+  const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
+  if (!apiKey)
+    throw new HttpsError("internal", "Sudo API key is not configured.");
+
+  const body = {
+    customerId,
+    type: type || "account",
+    currency: currency || "NGN",
+    accountType: accountType || "Savings",
+  };
+
+  try {
+    const response = await sudoRequest({
+      url: `${SUDO_BASE_URL}/accounts`,
+      method: "POST",
+      apiKey,
+      body,
+    });
+
+    const json = await response.json();
+    console.log("Sudo createAccount response:", JSON.stringify(json));
+    if (!response.ok) {
+      console.error("Sudo createAccount error:", json);
+      throw new HttpsError(
+        "internal",
+        JSON.stringify(json.message) || `HTTP ${response.status}`,
+      );
     }
-
-    const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
-
-    const body = {
-      customerId,
-      type: type || "account",
-      currency: currency || "NGN",
-      accountType: accountType || "Savings",
-    };
-
-    try {
-      const response = await sudoRequest({
-        url: `${SUDO_BASE_URL}/accounts`,
-        method: "POST",
-        apiKey,
-        body,
-      });
-
-      const json = await response.json();
-      console.log("Sudo createAccount response:", JSON.stringify(json));
-      if (!response.ok) {
-        console.error("Sudo createAccount error:", json);
-        throw new HttpsError("internal", JSON.stringify(json.message) || `HTTP ${response.status}`);
-      }
-      return json;
-    } catch (err) {
-      if (err instanceof HttpsError) throw err;
-      console.error("Sudo createAccount error:", err);
-      throw new HttpsError("internal", err.message);
-    }
-  },
-);
+    return json;
+  } catch (err) {
+    if (err instanceof HttpsError) throw err;
+    console.error("Sudo createAccount error:", err);
+    throw new HttpsError("internal", err.message);
+  }
+});
 
 // Fund a Sudo account then create a card (runs server-side; updates Firestore + sends notification)
 exports.sudoFundAndCreateCard = onCall(
@@ -10752,27 +12174,40 @@ exports.sudoFundAndCreateCard = onCall(
     });
 
     if (!userId || !cardDocId) {
-      throw new HttpsError("invalid-argument", "Missing required parameters: userId, cardDocId.");
+      throw new HttpsError(
+        "invalid-argument",
+        "Missing required parameters: userId, cardDocId.",
+      );
     }
 
     // Anonymous cards resolve customer from company Firestore doc; no caller-provided IDs needed
     const isAnonymousCard = (type || "").toLowerCase() === "anonymous";
     if (!isAnonymousCard && !customerId) {
-      throw new HttpsError("invalid-argument", "Missing required parameters: customerId.");
+      throw new HttpsError(
+        "invalid-argument",
+        "Missing required parameters: customerId.",
+      );
     }
 
     const resolvedCurrency = (currency || "NGN").toUpperCase();
-    const resolvedFundAmount = (typeof fundAmount === "number" && fundAmount >= 1) ? fundAmount : 5000;
+    const resolvedFundAmount =
+      typeof fundAmount === "number" && fundAmount >= 1 ? fundAmount : 5000;
     const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
+    if (!apiKey)
+      throw new HttpsError("internal", "Sudo API key is not configured.");
 
     const db = admin.firestore();
-    const cardRef = db.collection("users").doc(userId).collection("cards").doc(cardDocId);
+    const cardRef = db
+      .collection("users")
+      .doc(userId)
+      .collection("cards")
+      .doc(cardDocId);
     const cardDocSnap = await cardRef.get();
-    const cardDocData = cardDocSnap.exists ? (cardDocSnap.data() || {}) : {};
+    const cardDocData = cardDocSnap.exists ? cardDocSnap.data() || {} : {};
 
     const toPositiveNumber = (value) => {
-      if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
+      if (typeof value === "number" && Number.isFinite(value) && value > 0)
+        return value;
       if (typeof value === "string") {
         const parsed = Number(value);
         if (Number.isFinite(parsed) && parsed > 0) return parsed;
@@ -10781,7 +12216,11 @@ exports.sudoFundAndCreateCard = onCall(
     };
 
     if (!cardDocSnap.exists) {
-      console.warn("[sudoFundAndCreateCard] card document not found at start", { flowId, userId, cardDocId });
+      console.warn("[sudoFundAndCreateCard] card document not found at start", {
+        flowId,
+        userId,
+        cardDocId,
+      });
     }
 
     // Extracts a human-readable string from a Sudo API message field (may be string or array)
@@ -10805,7 +12244,13 @@ exports.sudoFundAndCreateCard = onCall(
         const userDoc = await db.collection("users").doc(userId).get();
         const deviceToken = userDoc.data()?.deviceToken;
         if (deviceToken) {
-          await admin.messaging().send({ token: deviceToken, notification: { title, body }, ...FCM_CHANNEL });
+          await admin
+            .messaging()
+            .send({
+              token: deviceToken,
+              notification: { title, body },
+              ...FCM_CHANNEL,
+            });
         }
       } catch (notifErr) {
         console.error("Push notification send error:", notifErr);
@@ -10821,7 +12266,10 @@ exports.sudoFundAndCreateCard = onCall(
           await sendNotifyEmail({ to: email, subject, html, text });
         }
       } catch (emailErr) {
-        console.error("[sudoFundAndCreateCard] Email send error:", emailErr.message);
+        console.error(
+          "[sudoFundAndCreateCard] Email send error:",
+          emailErr.message,
+        );
       }
     };
 
@@ -10838,7 +12286,9 @@ exports.sudoFundAndCreateCard = onCall(
 
         // Auto-create the Firestore doc with defaults if it doesn't exist yet
         if (!companySnap.exists) {
-          console.log("[sudoFundAndCreateCard] company/sudoAccountDetails missing ? creating with defaults...");
+          console.log(
+            "[sudoFundAndCreateCard] company/sudoAccountDetails missing ? creating with defaults...",
+          );
           await companyRef.set({
             name: "PadiPay Technologies Ltd",
             phoneNumber: "2348000000000",
@@ -10864,36 +12314,55 @@ exports.sudoFundAndCreateCard = onCall(
             },
             sudoCustomerId: "",
           });
-          console.log("[sudoFundAndCreateCard] company/sudoAccountDetails created with defaults ? update real values in Firebase Console.");
+          console.log(
+            "[sudoFundAndCreateCard] company/sudoAccountDetails created with defaults ? update real values in Firebase Console.",
+          );
         }
 
         // Re-read after potential creation
-        const companyData = (companySnap.exists ? companySnap : await companyRef.get()).data() || {};
+        const companyData =
+          (companySnap.exists ? companySnap : await companyRef.get()).data() ||
+          {};
         let companyCustomerId = companyData.sudoCustomerId || "";
 
         // Auto-create company Sudo customer if not yet provisioned
         if (!companyCustomerId) {
-          console.log("[sudoFundAndCreateCard] Provisioning company Sudo customer for anonymous cards...");
+          console.log(
+            "[sudoFundAndCreateCard] Provisioning company Sudo customer for anonymous cards...",
+          );
           const custBody = {
             type: "company",
             name: companyData.name || "PadiPay Technologies Ltd",
             phoneNumber: companyData.phoneNumber || "",
             emailAddress: companyData.emailAddress || "",
             status: "active",
-            ...(companyData.billingAddress ? { billingAddress: companyData.billingAddress } : {}),
+            ...(companyData.billingAddress
+              ? { billingAddress: companyData.billingAddress }
+              : {}),
             company: {
-              name: companyData.company?.name || companyData.name || "PadiPay Technologies Ltd",
-              ...(companyData.company?.identity ? { identity: companyData.company.identity } : {}),
-              ...(companyData.company?.officer ? {
-                officer: {
-                  firstName: companyData.company.officer.firstName || "",
-                  lastName: companyData.company.officer.lastName || "",
-                  phone: companyData.company.officer.phone || "",
-                  email: companyData.company.officer.email || "",
-                  ...(companyData.company.officer.identity ? { identity: companyData.company.officer.identity } : {}),
-                  ...(companyData.company.officer.dob ? { dob: companyData.company.officer.dob } : {}),
-                },
-              } : {}),
+              name:
+                companyData.company?.name ||
+                companyData.name ||
+                "PadiPay Technologies Ltd",
+              ...(companyData.company?.identity
+                ? { identity: companyData.company.identity }
+                : {}),
+              ...(companyData.company?.officer
+                ? {
+                    officer: {
+                      firstName: companyData.company.officer.firstName || "",
+                      lastName: companyData.company.officer.lastName || "",
+                      phone: companyData.company.officer.phone || "",
+                      email: companyData.company.officer.email || "",
+                      ...(companyData.company.officer.identity
+                        ? { identity: companyData.company.officer.identity }
+                        : {}),
+                      ...(companyData.company.officer.dob
+                        ? { dob: companyData.company.officer.dob }
+                        : {}),
+                    },
+                  }
+                : {}),
             },
           };
           const custRes = await sudoRequest({
@@ -10903,25 +12372,45 @@ exports.sudoFundAndCreateCard = onCall(
             body: custBody,
           });
           const custJson = await custRes.json();
-          console.log("[sudoFundAndCreateCard] Company customer create response:", JSON.stringify(custJson));
-          if (!custRes.ok) throw new Error(custJson.message || "Failed to create company Sudo customer");
+          console.log(
+            "[sudoFundAndCreateCard] Company customer create response:",
+            JSON.stringify(custJson),
+          );
+          if (!custRes.ok)
+            throw new Error(
+              custJson.message || "Failed to create company Sudo customer",
+            );
           companyCustomerId = custJson.data?._id;
-          if (!companyCustomerId) throw new Error("No _id in company Sudo customer response");
+          if (!companyCustomerId)
+            throw new Error("No _id in company Sudo customer response");
           await companyRef.update({ sudoCustomerId: companyCustomerId });
-          console.log("[sudoFundAndCreateCard] Company Sudo customer created:", companyCustomerId);
+          console.log(
+            "[sudoFundAndCreateCard] Company Sudo customer created:",
+            companyCustomerId,
+          );
         }
 
         effectiveCustomerId = companyCustomerId;
         if (!effectiveCustomerId) {
-          throw new Error("Company Sudo customer could not be provisioned. Please try again or contact support.");
+          throw new Error(
+            "Company Sudo customer could not be provisioned. Please try again or contact support.",
+          );
         }
-        anonymousCompanyName = companyData.name || "All Good Technologies Limited";
-        console.log(`[sudoFundAndCreateCard] Anonymous card: company customerId=${effectiveCustomerId}`);
+        anonymousCompanyName =
+          companyData.name || "All Good Technologies Limited";
+        console.log(
+          `[sudoFundAndCreateCard] Anonymous card: company customerId=${effectiveCustomerId}`,
+        );
       }
 
       if (resolvedCurrency === "USD") {
-        const companyRateSnap = await db.collection("company").doc("sudoAccountDetails").get();
-        const companyRateData = companyRateSnap.exists ? (companyRateSnap.data() || {}) : {};
+        const companyRateSnap = await db
+          .collection("company")
+          .doc("sudoAccountDetails")
+          .get();
+        const companyRateData = companyRateSnap.exists
+          ? companyRateSnap.data() || {}
+          : {};
 
         resolvedUsdNgnRate =
           toPositiveNumber(usdNgnRate) ||
@@ -10942,84 +12431,103 @@ exports.sudoFundAndCreateCard = onCall(
       // Step 0: Auto-update customer with phone, email and identity details
       // Sudo requires these before allowing card creation, so we do it every time (idempotent)
       // Skipped for anonymous cards (company customer; no per-user identity update)
-      if (!isAnonymousCard) try {
-        const userDoc = await db.collection("users").doc(userId).get();
-        const uData = userDoc.data() || {};
-        const firstName = uData.firstName || "";
-        const lastName = uData.lastName || "";
-        const phone = uData.phone || "";
-        const email = uData.emailAddress || uData.email || "";
-        const bvn = uData.bvn || "";
-        const dob = uData.dateOfBirth || ""; // expected as YYYY-MM-DD or similar
-        const addr = uData.address || {};
+      if (!isAnonymousCard)
+        try {
+          const userDoc = await db.collection("users").doc(userId).get();
+          const uData = userDoc.data() || {};
+          const firstName = uData.firstName || "";
+          const lastName = uData.lastName || "";
+          const phone = uData.phone || "";
+          const email = uData.emailAddress || uData.email || "";
+          const bvn = uData.bvn || "";
+          const dob = uData.dateOfBirth || ""; // expected as YYYY-MM-DD or similar
+          const addr = uData.address || {};
 
-        // Format phone to E.164-style Nigerian number expected by Sudo
-        let formattedPhone = phone.replace(/\D/g, "");
-        if (formattedPhone.startsWith("0") && formattedPhone.length === 11) {
-          formattedPhone = "234" + formattedPhone.substring(1);
-        } else if (formattedPhone.length === 10 && !formattedPhone.startsWith("234")) {
-          formattedPhone = "234" + formattedPhone;
-        }
-
-        // Format DOB to YYYY/MM/DD (Sudo's required format) from DD/MM/YYYY stored in Firestore
-        let formattedDob = dob;
-        if (dob && dob.includes("/")) {
-          const parts = dob.split("/");
-          if (parts.length === 3) {
-            if (parts[0].length === 4) {
-              // Already YYYY/MM/DD ? reformat slashes just in case
-              formattedDob = `${parts[0]}/${parts[1].padStart(2, "0")}/${parts[2].padStart(2, "0")}`;
-            } else {
-              // Assume DD/MM/YYYY ? convert to YYYY/MM/DD
-              formattedDob = `${parts[2]}/${parts[1].padStart(2, "0")}/${parts[0].padStart(2, "0")}`;
-            }
+          // Format phone to E.164-style Nigerian number expected by Sudo
+          let formattedPhone = phone.replace(/\D/g, "");
+          if (formattedPhone.startsWith("0") && formattedPhone.length === 11) {
+            formattedPhone = "234" + formattedPhone.substring(1);
+          } else if (
+            formattedPhone.length === 10 &&
+            !formattedPhone.startsWith("234")
+          ) {
+            formattedPhone = "234" + formattedPhone;
           }
-        } else if (dob && dob.includes("-")) {
-          // Handle YYYY-MM-DD ? YYYY/MM/DD
-          formattedDob = dob.replace(/-/g, "/");
-        }
 
-        const updateBody = {
-          phoneNumber: formattedPhone || phone,
-          emailAddress: email,
-          individual: {
-            firstName,
-            lastName,
-            // dateOfBirth goes at the individual level as `dob`, format YYYY/MM/DD
-            ...(formattedDob ? { dob: formattedDob } : {}),
-            ...(bvn ? {
-              identity: {
-                type: "BVN",
-                number: bvn,
-              },
-            } : {}),
-          },
-          ...(addr.street ? {
-            billingAddress: {
-              line1: addr.street,
-              city: addr.city || "",
-              state: addr.state || "",
-              country: addr.country || "NG",
-              postalCode: String(addr.postalCode || "000000"),
+          // Format DOB to YYYY/MM/DD (Sudo's required format) from DD/MM/YYYY stored in Firestore
+          let formattedDob = dob;
+          if (dob && dob.includes("/")) {
+            const parts = dob.split("/");
+            if (parts.length === 3) {
+              if (parts[0].length === 4) {
+                // Already YYYY/MM/DD ? reformat slashes just in case
+                formattedDob = `${parts[0]}/${parts[1].padStart(2, "0")}/${parts[2].padStart(2, "0")}`;
+              } else {
+                // Assume DD/MM/YYYY ? convert to YYYY/MM/DD
+                formattedDob = `${parts[2]}/${parts[1].padStart(2, "0")}/${parts[0].padStart(2, "0")}`;
+              }
+            }
+          } else if (dob && dob.includes("-")) {
+            // Handle YYYY-MM-DD ? YYYY/MM/DD
+            formattedDob = dob.replace(/-/g, "/");
+          }
+
+          const updateBody = {
+            phoneNumber: formattedPhone || phone,
+            emailAddress: email,
+            individual: {
+              firstName,
+              lastName,
+              // dateOfBirth goes at the individual level as `dob`, format YYYY/MM/DD
+              ...(formattedDob ? { dob: formattedDob } : {}),
+              ...(bvn
+                ? {
+                    identity: {
+                      type: "BVN",
+                      number: bvn,
+                    },
+                  }
+                : {}),
             },
-          } : {}),
-        };
+            ...(addr.street
+              ? {
+                  billingAddress: {
+                    line1: addr.street,
+                    city: addr.city || "",
+                    state: addr.state || "",
+                    country: addr.country || "NG",
+                    postalCode: String(addr.postalCode || "000000"),
+                  },
+                }
+              : {}),
+          };
 
-        console.log(`[sudoFundAndCreateCard] Step 0: Updating customer ${customerId} with identity data`);
-        const updateRes = await sudoRequest({
-          url: `${SUDO_BASE_URL}/customers/${encodeURIComponent(customerId)}`,
-          method: "PUT",
-          apiKey,
-          body: updateBody,
-        });
-        const updateJson = await updateRes.json();
-        console.log("[sudoFundAndCreateCard] Customer update response:", JSON.stringify(updateJson));
-        if (!updateRes.ok) {
-          console.warn("[sudoFundAndCreateCard] Customer update failed (non-fatal):", updateJson.message);
+          console.log(
+            `[sudoFundAndCreateCard] Step 0: Updating customer ${customerId} with identity data`,
+          );
+          const updateRes = await sudoRequest({
+            url: `${SUDO_BASE_URL}/customers/${encodeURIComponent(customerId)}`,
+            method: "PUT",
+            apiKey,
+            body: updateBody,
+          });
+          const updateJson = await updateRes.json();
+          console.log(
+            "[sudoFundAndCreateCard] Customer update response:",
+            JSON.stringify(updateJson),
+          );
+          if (!updateRes.ok) {
+            console.warn(
+              "[sudoFundAndCreateCard] Customer update failed (non-fatal):",
+              updateJson.message,
+            );
+          }
+        } catch (updateErr) {
+          console.warn(
+            "[sudoFundAndCreateCard] Customer update step failed (non-fatal):",
+            updateErr.message,
+          );
         }
-      } catch (updateErr) {
-        console.warn("[sudoFundAndCreateCard] Customer update step failed (non-fatal):", updateErr.message);
-      }
 
       // Step 1: Resolve debitAccountId
       // Sudo requires debitAccountId on /cards. Sudo limits ONE NGN + ONE USD account per business,
@@ -11029,17 +12537,28 @@ exports.sudoFundAndCreateCard = onCall(
       {
         const companyRef = db.collection("company").doc("sudoAccountDetails");
         const companySnap = await companyRef.get();
-        const companyData = companySnap.exists ? (companySnap.data() || {}) : {};
-        const accountField = resolvedCurrency === "USD" ? "sudoUsdAccountId" : "sudoNgnAccountId";
+        const companyData = companySnap.exists ? companySnap.data() || {} : {};
+        const accountField =
+          resolvedCurrency === "USD" ? "sudoUsdAccountId" : "sudoNgnAccountId";
 
         // 1. Check company doc first
         effectiveDebitAccountId = companyData[accountField] || "";
 
         // 2. If caller passed a known account ID, adopt it
-        if (!effectiveDebitAccountId && debitAccountId && typeof debitAccountId === "string" && debitAccountId.length === 24) {
+        if (
+          !effectiveDebitAccountId &&
+          debitAccountId &&
+          typeof debitAccountId === "string" &&
+          debitAccountId.length === 24
+        ) {
           effectiveDebitAccountId = debitAccountId;
-          console.log(`[sudoFundAndCreateCard] Adopting caller-provided debitAccountId: ${effectiveDebitAccountId}`);
-          await companyRef.set({ [accountField]: effectiveDebitAccountId }, { merge: true });
+          console.log(
+            `[sudoFundAndCreateCard] Adopting caller-provided debitAccountId: ${effectiveDebitAccountId}`,
+          );
+          await companyRef.set(
+            { [accountField]: effectiveDebitAccountId },
+            { merge: true },
+          );
         }
 
         // 3. GET /accounts to find the business settlement account
@@ -11051,31 +12570,49 @@ exports.sudoFundAndCreateCard = onCall(
               apiKey,
             });
             const accsJson = await accsRes.json();
-            console.log(`[sudoFundAndCreateCard] GET /accounts:`, JSON.stringify(accsJson));
+            console.log(
+              `[sudoFundAndCreateCard] GET /accounts:`,
+              JSON.stringify(accsJson),
+            );
             if (accsRes.ok && Array.isArray(accsJson.data)) {
-              const match = accsJson.data.find((a) =>
-                (a.type || "").toLowerCase() === "account" &&
-                (a.currency || "").toUpperCase() === resolvedCurrency
+              const match = accsJson.data.find(
+                (a) =>
+                  (a.type || "").toLowerCase() === "account" &&
+                  (a.currency || "").toUpperCase() === resolvedCurrency,
               );
-              if (match?._id && typeof match._id === "string" && match._id.length === 24) {
+              if (
+                match?._id &&
+                typeof match._id === "string" &&
+                match._id.length === 24
+              ) {
                 effectiveDebitAccountId = match._id;
-                await companyRef.set({ [accountField]: effectiveDebitAccountId }, { merge: true });
-                console.log(`[sudoFundAndCreateCard] Found ${resolvedCurrency} settlement account: ${effectiveDebitAccountId}`);
+                await companyRef.set(
+                  { [accountField]: effectiveDebitAccountId },
+                  { merge: true },
+                );
+                console.log(
+                  `[sudoFundAndCreateCard] Found ${resolvedCurrency} settlement account: ${effectiveDebitAccountId}`,
+                );
               }
             }
           } catch (listErr) {
-            console.warn("[sudoFundAndCreateCard] GET /accounts failed:", listErr.message);
+            console.warn(
+              "[sudoFundAndCreateCard] GET /accounts failed:",
+              listErr.message,
+            );
           }
         }
 
         if (!effectiveDebitAccountId) {
           throw new Error(
             `Card setup incomplete: no ${resolvedCurrency} settlement account found. ` +
-            `Please contact support or try again.`
+              `Please contact support or try again.`,
           );
         }
 
-        console.log(`[sudoFundAndCreateCard] Resolved debitAccountId (${resolvedCurrency}): ${effectiveDebitAccountId}`);
+        console.log(
+          `[sudoFundAndCreateCard] Resolved debitAccountId (${resolvedCurrency}): ${effectiveDebitAccountId}`,
+        );
       }
 
       // Step 1.5: Resolve fundingSourceId.
@@ -11085,9 +12622,11 @@ exports.sudoFundAndCreateCard = onCall(
       {
         const companyRef = db.collection("company").doc("sudoAccountDetails");
         const companySnap = await companyRef.get();
-        const companyData = companySnap.exists ? (companySnap.data() || {}) : {};
+        const companyData = companySnap.exists ? companySnap.data() || {} : {};
         const needsDefaultFundingSource = resolvedCurrency === "USD";
-        const requiredFundingType = needsDefaultFundingSource ? "default" : "gateway";
+        const requiredFundingType = needsDefaultFundingSource
+          ? "default"
+          : "gateway";
         const fundingSourceField = needsDefaultFundingSource
           ? "sudoUsdFundingSourceId"
           : "sudoFundingSourceId";
@@ -11100,12 +12639,18 @@ exports.sudoFundAndCreateCard = onCall(
               apiKey,
             });
             const fsJson = await fsRes.json();
-            console.log("[sudoFundAndCreateCard] GET /fundingsources:", JSON.stringify(fsJson));
+            console.log(
+              "[sudoFundAndCreateCard] GET /fundingsources:",
+              JSON.stringify(fsJson),
+            );
             if (fsRes.ok && Array.isArray(fsJson.data)) {
               return fsJson.data;
             }
           } catch (fsErr) {
-            console.warn("[sudoFundAndCreateCard] GET /fundingsources failed:", fsErr.message);
+            console.warn(
+              "[sudoFundAndCreateCard] GET /fundingsources failed:",
+              fsErr.message,
+            );
           }
           return [];
         };
@@ -11116,19 +12661,26 @@ exports.sudoFundAndCreateCard = onCall(
           f?.isDeleted !== true;
 
         const firstActiveRequiredType = (sources) =>
-          sources.find((f) => isActiveRequiredType(f) && f?.isDefault === true) ||
-          sources.find((f) => isActiveRequiredType(f));
+          sources.find(
+            (f) => isActiveRequiredType(f) && f?.isDefault === true,
+          ) || sources.find((f) => isActiveRequiredType(f));
 
         const fundingSources = await fetchFundingSources();
         const activeFundingSource = firstActiveRequiredType(fundingSources);
-        const activeFundingSourceId = activeFundingSource?._id && typeof activeFundingSource._id === "string"
-          ? activeFundingSource._id
-          : "";
+        const activeFundingSourceId =
+          activeFundingSource?._id &&
+          typeof activeFundingSource._id === "string"
+            ? activeFundingSource._id
+            : "";
 
         // 1. Check company doc first
-        const companyFundingSourceId = (companyData[fundingSourceField] || "").toString();
+        const companyFundingSourceId = (
+          companyData[fundingSourceField] || ""
+        ).toString();
         if (companyFundingSourceId) {
-          const companySource = fundingSources.find((f) => (f?._id || "").toString() === companyFundingSourceId);
+          const companySource = fundingSources.find(
+            (f) => (f?._id || "").toString() === companyFundingSourceId,
+          );
           if (companySource && isActiveRequiredType(companySource)) {
             effectiveFundingSourceId = companyFundingSourceId;
           } else {
@@ -11140,12 +12692,21 @@ exports.sudoFundAndCreateCard = onCall(
         }
 
         // 2. If caller passed one, adopt it and persist for subsequent card creations
-        if (!effectiveFundingSourceId && fundingSourceId && typeof fundingSourceId === "string") {
+        if (
+          !effectiveFundingSourceId &&
+          fundingSourceId &&
+          typeof fundingSourceId === "string"
+        ) {
           const callerFundingSourceId = fundingSourceId.trim();
-          const callerSource = fundingSources.find((f) => (f?._id || "").toString() === callerFundingSourceId);
+          const callerSource = fundingSources.find(
+            (f) => (f?._id || "").toString() === callerFundingSourceId,
+          );
           if (callerSource && isActiveRequiredType(callerSource)) {
             effectiveFundingSourceId = callerFundingSourceId;
-            await companyRef.set({ [fundingSourceField]: effectiveFundingSourceId }, { merge: true });
+            await companyRef.set(
+              { [fundingSourceField]: effectiveFundingSourceId },
+              { merge: true },
+            );
             console.log(
               `[sudoFundAndCreateCard] Adopting caller-provided active ${requiredFundingType} fundingSourceId: ${effectiveFundingSourceId}`,
             );
@@ -11159,7 +12720,10 @@ exports.sudoFundAndCreateCard = onCall(
         // 3. Use active funding source from /fundingsources for this currency profile
         if (!effectiveFundingSourceId && activeFundingSourceId) {
           effectiveFundingSourceId = activeFundingSourceId;
-          await companyRef.set({ [fundingSourceField]: effectiveFundingSourceId }, { merge: true });
+          await companyRef.set(
+            { [fundingSourceField]: effectiveFundingSourceId },
+            { merge: true },
+          );
           console.log(
             `[sudoFundAndCreateCard] Using active ${requiredFundingType} fundingSourceId from /fundingsources: ${effectiveFundingSourceId}`,
           );
@@ -11178,35 +12742,50 @@ exports.sudoFundAndCreateCard = onCall(
               body: { type: requiredFundingType, status: "active" },
             });
             const createFsJson = await createFsRes.json();
-            console.log("[sudoFundAndCreateCard] Auto-create fundingSource response:", JSON.stringify(createFsJson));
+            console.log(
+              "[sudoFundAndCreateCard] Auto-create fundingSource response:",
+              JSON.stringify(createFsJson),
+            );
             const createdId = createFsJson?.data?._id;
             if (createFsRes.ok && createdId && typeof createdId === "string") {
               effectiveFundingSourceId = createdId;
-              await companyRef.set({ [fundingSourceField]: effectiveFundingSourceId }, { merge: true });
+              await companyRef.set(
+                { [fundingSourceField]: effectiveFundingSourceId },
+                { merge: true },
+              );
               console.log(
                 `[sudoFundAndCreateCard] Auto-created ${requiredFundingType} fundingSourceId: ${effectiveFundingSourceId}`,
               );
             } else {
-              console.error("[sudoFundAndCreateCard] Auto-create fundingSource failed:", createFsJson?.message || `HTTP ${createFsRes.status}`);
+              console.error(
+                "[sudoFundAndCreateCard] Auto-create fundingSource failed:",
+                createFsJson?.message || `HTTP ${createFsRes.status}`,
+              );
             }
           } catch (createFsErr) {
-            console.error("[sudoFundAndCreateCard] Auto-create fundingSource error:", createFsErr.message);
+            console.error(
+              "[sudoFundAndCreateCard] Auto-create fundingSource error:",
+              createFsErr.message,
+            );
           }
         }
 
         if (effectiveFundingSourceId) {
-          console.log(`[sudoFundAndCreateCard] Resolved fundingSourceId: ${effectiveFundingSourceId}`);
+          console.log(
+            `[sudoFundAndCreateCard] Resolved fundingSourceId: ${effectiveFundingSourceId}`,
+          );
         } else {
           throw new Error(
             `Card setup incomplete: no active ${requiredFundingType} fundingSourceId found and auto-create failed. ` +
-            "Please verify Sudo funding sources and try again."
+              "Please verify Sudo funding sources and try again.",
           );
         }
       }
 
       // Step 2: Create the card
       const isPhysical = (type || "virtual") === "physical";
-      const resolvedIssuerCountry = issuerCountry || (resolvedCurrency === "USD" ? "USA" : "NGA");
+      const resolvedIssuerCountry =
+        issuerCountry || (resolvedCurrency === "USD" ? "USA" : "NGA");
       const normalizePhysicalBrand = (rawBrand) => {
         const val = (rawBrand || "").toString().toLowerCase();
         if (val.includes("afrigo")) return "AfriGo";
@@ -11218,7 +12797,9 @@ exports.sudoFundAndCreateCard = onCall(
 
       let currentInventoryCardDocId = cardDocData.inventoryCardDocId || null;
       let currentPhysicalCardNumber = "";
-      const currentPhysicalBrand = normalizePhysicalBrand(brand || cardDocData.scheme || "Verve");
+      const currentPhysicalBrand = normalizePhysicalBrand(
+        brand || cardDocData.scheme || "Verve",
+      );
 
       const reserveReplacementPhysicalNumber = async () => {
         const nextInvSnap = await db
@@ -11275,7 +12856,9 @@ exports.sudoFundAndCreateCard = onCall(
           cardDocData.cardNumber ||
           cardNumber ||
           ""
-        ).toString().trim();
+        )
+          .toString()
+          .trim();
 
         if (!currentPhysicalCardNumber) {
           throw new Error(
@@ -11307,12 +12890,14 @@ exports.sudoFundAndCreateCard = onCall(
         const cardReference = `PADI-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
         const cardBody = {
           customerId: effectiveCustomerId,
-          type: isAnonymousCard ? "virtual" : (type || "virtual"),
+          type: isAnonymousCard ? "virtual" : type || "virtual",
           currency: resolvedCurrency,
           status: "active",
           brand: brand || "Verve",
           debitAccountId: effectiveDebitAccountId,
-          ...(effectiveFundingSourceId ? { fundingSourceId: effectiveFundingSourceId } : {}),
+          ...(effectiveFundingSourceId
+            ? { fundingSourceId: effectiveFundingSourceId }
+            : {}),
           amount: resolvedFundAmount,
           issuerCountry: resolvedIssuerCountry,
           ...(isPhysical && {
@@ -11349,19 +12934,30 @@ exports.sudoFundAndCreateCard = onCall(
           message: cardJson?.message || null,
         });
 
-        if (cardResponse.ok && !(cardJson.statusCode && cardJson.statusCode >= 400)) {
+        if (
+          cardResponse.ok &&
+          !(cardJson.statusCode && cardJson.statusCode >= 400)
+        ) {
           cardData = cardJson.data;
           break;
         }
 
-        const msg = parseSudoMessage(cardJson.message) || "Card creation failed";
-        if (isPhysical && attempt < maxCreateAttempts && isLinkedPhysicalError(msg)) {
-          console.warn("[sudoFundAndCreateCard] Physical PAN already linked; rotating inventory and retrying", {
-            flowId,
-            attempt,
-            inventoryCardDocId: currentInventoryCardDocId,
-            reason: msg,
-          });
+        const msg =
+          parseSudoMessage(cardJson.message) || "Card creation failed";
+        if (
+          isPhysical &&
+          attempt < maxCreateAttempts &&
+          isLinkedPhysicalError(msg)
+        ) {
+          console.warn(
+            "[sudoFundAndCreateCard] Physical PAN already linked; rotating inventory and retrying",
+            {
+              flowId,
+              attempt,
+              inventoryCardDocId: currentInventoryCardDocId,
+              reason: msg,
+            },
+          );
 
           if (currentInventoryCardDocId) {
             await db
@@ -11377,11 +12973,14 @@ exports.sudoFundAndCreateCard = onCall(
                 { merge: true },
               )
               .catch((invErr) => {
-                console.warn("[sudoFundAndCreateCard] Failed to mark invalid inventory PAN", {
-                  flowId,
-                  inventoryCardDocId: currentInventoryCardDocId,
-                  error: invErr.message,
-                });
+                console.warn(
+                  "[sudoFundAndCreateCard] Failed to mark invalid inventory PAN",
+                  {
+                    flowId,
+                    inventoryCardDocId: currentInventoryCardDocId,
+                    error: invErr.message,
+                  },
+                );
               });
           }
 
@@ -11417,7 +13016,9 @@ exports.sudoFundAndCreateCard = onCall(
       const cardId = cardData?._id;
 
       if (!cardId) {
-        throw new Error(`Card creation succeeded but no _id returned: ${JSON.stringify(cardData)}`);
+        throw new Error(
+          `Card creation succeeded but no _id returned: ${JSON.stringify(cardData)}`,
+        );
       }
 
       // Step 3: Update Firestore card doc to active
@@ -11434,9 +13035,16 @@ exports.sudoFundAndCreateCard = onCall(
               fundAmountNgnEquivalent: resolvedFundAmountNgnEquivalent,
             }
           : {}),
-        ...(isAnonymousCard && anonymousCompanyName ? { nameOnCard: anonymousCompanyName } : {}),
+        ...(isAnonymousCard && anonymousCompanyName
+          ? { nameOnCard: anonymousCompanyName }
+          : {}),
       });
-      console.log("[sudoFundAndCreateCard] Card saved", { flowId, cardId, userId, cardDocId });
+      console.log("[sudoFundAndCreateCard] Card saved", {
+        flowId,
+        cardId,
+        userId,
+        cardDocId,
+      });
 
       // Step 3.5: Auto-change card PIN from Sudo default to user's chosen PIN
       try {
@@ -11457,24 +13065,33 @@ exports.sudoFundAndCreateCard = onCall(
               apiKey,
               body: { oldPin: defaultPin, newPin: userPin },
             });
-            console.log("[sudoFundAndCreateCard] PIN auto-changed", { flowId, cardId });
+            console.log("[sudoFundAndCreateCard] PIN auto-changed", {
+              flowId,
+              cardId,
+            });
           } else {
-            console.warn("[sudoFundAndCreateCard] Could not retrieve default PIN", { flowId, cardId });
+            console.warn(
+              "[sudoFundAndCreateCard] Could not retrieve default PIN",
+              { flowId, cardId },
+            );
           }
         }
       } catch (pinErr) {
-        console.warn("[sudoFundAndCreateCard] PIN auto-change failed (non-fatal)", {
-          flowId,
-          cardId,
-          error: pinErr.message,
-        });
+        console.warn(
+          "[sudoFundAndCreateCard] PIN auto-change failed (non-fatal)",
+          {
+            flowId,
+            cardId,
+            error: pinErr.message,
+          },
+        );
       }
 
       // Step 4: Notify user and save to notifications collection
       await sendAndSaveNotification(
         "Your card is ready! ??",
         `Your ${resolvedCurrency} virtual card has been created successfully.`,
-        "card_created"
+        "card_created",
       );
 
       // Step 5: Send confirmation email
@@ -11490,10 +13107,15 @@ exports.sudoFundAndCreateCard = onCall(
           <p style="margin:0 0 16px;">You can now use your card for online payments. Open the PadiPay app to view your card details.</p>
           <p style="margin:0;color:#6b7280;font-size:13px;">If you did not request this card, please contact PadiPay support immediately.</p>
         </div>`,
-        `Your ${resolvedCurrency} card has been created successfully on PadiPay. Open the app to view your card details.`
+        `Your ${resolvedCurrency} card has been created successfully on PadiPay. Open the app to view your card details.`,
       );
 
-      console.log("[sudoFundAndCreateCard] SUCCESS", { flowId, userId, cardDocId, cardId });
+      console.log("[sudoFundAndCreateCard] SUCCESS", {
+        flowId,
+        userId,
+        cardDocId,
+        cardId,
+      });
       return { success: true, cardId, flowId };
     } catch (err) {
       console.error("[sudoFundAndCreateCard] ERROR", {
@@ -11510,17 +13132,33 @@ exports.sudoFundAndCreateCard = onCall(
       // release it back to inventory so it can be reused on future requests.
       try {
         const failedCardSnap = await cardRef.get();
-        const failedCardData = failedCardSnap.exists ? (failedCardSnap.data() || {}) : {};
-        const isPhysicalCard = (failedCardData.type || type || "").toString().toLowerCase() === "physical";
-        const inventoryCardDocId = (failedCardData.inventoryCardDocId || "").toString();
+        const failedCardData = failedCardSnap.exists
+          ? failedCardSnap.data() || {}
+          : {};
+        const isPhysicalCard =
+          (failedCardData.type || type || "").toString().toLowerCase() ===
+          "physical";
+        const inventoryCardDocId = (
+          failedCardData.inventoryCardDocId || ""
+        ).toString();
 
         if (isPhysicalCard && inventoryCardDocId) {
-          const inventoryRef = db.collection("physical_card_inventory").doc(inventoryCardDocId);
+          const inventoryRef = db
+            .collection("physical_card_inventory")
+            .doc(inventoryCardDocId);
           const inventorySnap = await inventoryRef.get();
-          const inventoryData = inventorySnap.exists ? (inventorySnap.data() || {}) : {};
-          const inventoryStatus = (inventoryData.status || "").toString().toLowerCase();
-          const assignedUserId = (inventoryData.assignedUserId || "").toString();
-          const assignedCardDocId = (inventoryData.assignedCardDocId || "").toString();
+          const inventoryData = inventorySnap.exists
+            ? inventorySnap.data() || {}
+            : {};
+          const inventoryStatus = (inventoryData.status || "")
+            .toString()
+            .toLowerCase();
+          const assignedUserId = (
+            inventoryData.assignedUserId || ""
+          ).toString();
+          const assignedCardDocId = (
+            inventoryData.assignedCardDocId || ""
+          ).toString();
 
           if (inventorySnap.exists) {
             await inventoryRef.update({
@@ -11542,17 +13180,21 @@ exports.sudoFundAndCreateCard = onCall(
               assignedPhysicalCardNumber: admin.firestore.FieldValue.delete(),
               physicalCardDelivered: admin.firestore.FieldValue.delete(),
               physicalCardTracking: admin.firestore.FieldValue.delete(),
-              inventoryAssignmentReleasedAt: admin.firestore.FieldValue.serverTimestamp(),
+              inventoryAssignmentReleasedAt:
+                admin.firestore.FieldValue.serverTimestamp(),
               inventoryAssignmentReleaseReason: err.message || "unknown",
             });
 
-            console.log("[sudoFundAndCreateCard] Released physical inventory assignment after failure", {
-              flowId,
-              inventoryCardDocId,
-              userId,
-              cardDocId,
-              previousStatus: inventoryStatus || null,
-            });
+            console.log(
+              "[sudoFundAndCreateCard] Released physical inventory assignment after failure",
+              {
+                flowId,
+                inventoryCardDocId,
+                userId,
+                cardDocId,
+                previousStatus: inventoryStatus || null,
+              },
+            );
           } else {
             console.warn("[sudoFundAndCreateCard] Skipped inventory release", {
               flowId,
@@ -11565,12 +13207,15 @@ exports.sudoFundAndCreateCard = onCall(
           }
         }
       } catch (releaseErr) {
-        console.error("[sudoFundAndCreateCard] Failed to release physical inventory assignment", {
-          flowId,
-          userId,
-          cardDocId,
-          error: releaseErr.message,
-        });
+        console.error(
+          "[sudoFundAndCreateCard] Failed to release physical inventory assignment",
+          {
+            flowId,
+            userId,
+            cardDocId,
+            error: releaseErr.message,
+          },
+        );
       }
 
       // Mark card as failed
@@ -11597,7 +13242,7 @@ exports.sudoFundAndCreateCard = onCall(
       await sendAndSaveNotification(
         "Card creation failed",
         userMsg,
-        "card_failed"
+        "card_failed",
       );
       await sendCardEmail(
         `Card Creation Failed ? PadiPay`,
@@ -11606,7 +13251,7 @@ exports.sudoFundAndCreateCard = onCall(
           <p style="margin:0 0 16px;">Unfortunately, we were unable to create your ${resolvedCurrency} card on PadiPay.</p>
           ${emailReason}<p style="margin:0 0 16px;">Please try again from the app. If the problem persists, contact PadiPay support.</p>
         </div>`,
-        `${userMsg} If the problem persists, contact PadiPay support.`
+        `${userMsg} If the problem persists, contact PadiPay support.`,
       );
       throw new HttpsError("internal", err.message);
     }
@@ -11614,167 +13259,189 @@ exports.sudoFundAndCreateCard = onCall(
 );
 
 // Get all Sudo customers
-exports.sudoChangeCardPin = onCall(
-  { secrets: [sudoApiKey] },
-  async (data) => {
-    await ensureVerifiedOrStandUser(data.auth);
-    const { cardId, oldPin, newPin } = data.data || {};
-    console.log(`[sudoChangeCardPin] Called for cardId: ${cardId}, uid: ${data.auth?.uid}`);
+exports.sudoChangeCardPin = onCall({ secrets: [sudoApiKey] }, async (data) => {
+  await ensureVerifiedOrStandUser(data.auth);
+  const { cardId, oldPin, newPin } = data.data || {};
+  console.log(
+    `[sudoChangeCardPin] Called for cardId: ${cardId}, uid: ${data.auth?.uid}`,
+  );
 
-    if (!cardId || typeof cardId !== "string") throw new HttpsError("invalid-argument", "cardId is required.");
-    if (!oldPin || typeof oldPin !== "string" || oldPin.length !== 4) throw new HttpsError("invalid-argument", "oldPin must be a 4-digit string.");
-    if (!newPin || typeof newPin !== "string" || newPin.length !== 4) throw new HttpsError("invalid-argument", "newPin must be a 4-digit string.");
+  if (!cardId || typeof cardId !== "string")
+    throw new HttpsError("invalid-argument", "cardId is required.");
+  if (!oldPin || typeof oldPin !== "string" || oldPin.length !== 4)
+    throw new HttpsError(
+      "invalid-argument",
+      "oldPin must be a 4-digit string.",
+    );
+  if (!newPin || typeof newPin !== "string" || newPin.length !== 4)
+    throw new HttpsError(
+      "invalid-argument",
+      "newPin must be a 4-digit string.",
+    );
 
-    const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
+  const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
+  if (!apiKey)
+    throw new HttpsError("internal", "Sudo API key is not configured.");
 
-    try {
-      const response = await sudoRequest({
-        url: `${SUDO_BASE_URL}/cards/${cardId}/pin`,
-        method: "PUT",
-        apiKey,
-        body: { oldPin, newPin },
-      });
+  try {
+    const response = await sudoRequest({
+      url: `${SUDO_BASE_URL}/cards/${cardId}/pin`,
+      method: "PUT",
+      apiKey,
+      body: { oldPin, newPin },
+    });
 
-      const json = await response.json();
-      console.log("[sudoChangeCardPin] Response:", JSON.stringify(json));
+    const json = await response.json();
+    console.log("[sudoChangeCardPin] Response:", JSON.stringify(json));
 
-      if (!response.ok) {
-        const msg = json.message || `HTTP ${response.status}`;
-        throw new HttpsError("internal", msg);
-      }
+    if (!response.ok) {
+      const msg = json.message || `HTTP ${response.status}`;
+      throw new HttpsError("internal", msg);
+    }
 
-      // Update Firestore pin field so local verification stays in sync
-      const uid = data.auth?.uid;
-      if (uid) {
-        try {
-          const cardsSnap = await db.collection("cards")
-            .where("user_id", "==", uid)
-            .where("card_id", "==", cardId)
-            .limit(1)
-            .get();
-          if (!cardsSnap.empty) {
-            await cardsSnap.docs[0].ref.update({ pin: newPin });
-            console.log(`[sudoChangeCardPin] Firestore pin updated for cardId: ${cardId}`);
-          } else {
-            console.warn(`[sudoChangeCardPin] No Firestore card doc found for cardId: ${cardId}, uid: ${uid}`);
-          }
-        } catch (fsErr) {
-          console.warn("[sudoChangeCardPin] Firestore pin update failed (non-fatal):", fsErr.message);
+    // Update Firestore pin field so local verification stays in sync
+    const uid = data.auth?.uid;
+    if (uid) {
+      try {
+        const cardsSnap = await db
+          .collection("cards")
+          .where("user_id", "==", uid)
+          .where("card_id", "==", cardId)
+          .limit(1)
+          .get();
+        if (!cardsSnap.empty) {
+          await cardsSnap.docs[0].ref.update({ pin: newPin });
+          console.log(
+            `[sudoChangeCardPin] Firestore pin updated for cardId: ${cardId}`,
+          );
+        } else {
+          console.warn(
+            `[sudoChangeCardPin] No Firestore card doc found for cardId: ${cardId}, uid: ${uid}`,
+          );
         }
+      } catch (fsErr) {
+        console.warn(
+          "[sudoChangeCardPin] Firestore pin update failed (non-fatal):",
+          fsErr.message,
+        );
       }
-
-      console.log(`[sudoChangeCardPin] Success for cardId: ${cardId}`);
-      return { success: true };
-    } catch (err) {
-      if (err instanceof HttpsError) throw err;
-      console.error("[sudoChangeCardPin] Error:", err);
-      throw new HttpsError("internal", err.message);
     }
-  },
-);
 
-exports.sudoGetCustomers = onCall(
-  { secrets: [sudoApiKey] },
-  async (data) => {
-    await ensureVerifiedOrStandUser(data.auth);
-    const { page, limit } = data.data || {};
+    console.log(`[sudoChangeCardPin] Success for cardId: ${cardId}`);
+    return { success: true };
+  } catch (err) {
+    if (err instanceof HttpsError) throw err;
+    console.error("[sudoChangeCardPin] Error:", err);
+    throw new HttpsError("internal", err.message);
+  }
+});
 
-    const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
+exports.sudoGetCustomers = onCall({ secrets: [sudoApiKey] }, async (data) => {
+  await ensureVerifiedOrStandUser(data.auth);
+  const { page, limit } = data.data || {};
 
-    const params = new URLSearchParams();
-    if (page !== undefined) params.append("page", String(page));
-    if (limit !== undefined) params.append("limit", String(limit));
+  const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
+  if (!apiKey)
+    throw new HttpsError("internal", "Sudo API key is not configured.");
 
-    try {
-      const response = await sudoRequest({
-        url: `${SUDO_BASE_URL}/customers?${params.toString()}`,
-        method: "GET",
-        apiKey,
-      });
+  const params = new URLSearchParams();
+  if (page !== undefined) params.append("page", String(page));
+  if (limit !== undefined) params.append("limit", String(limit));
 
-      const json = await response.json();
-      console.log("Sudo getCustomers response:", JSON.stringify(json));
-      if (!response.ok) {
-        console.error("Sudo getCustomers error:", json);
-        throw new HttpsError("internal", json.message || `HTTP ${response.status}`);
-      }
-      return json;
-    } catch (err) {
-      if (err instanceof HttpsError) throw err;
-      console.error("Sudo getCustomers error:", err);
-      throw new HttpsError("internal", err.message);
+  try {
+    const response = await sudoRequest({
+      url: `${SUDO_BASE_URL}/customers?${params.toString()}`,
+      method: "GET",
+      apiKey,
+    });
+
+    const json = await response.json();
+    console.log("Sudo getCustomers response:", JSON.stringify(json));
+    if (!response.ok) {
+      console.error("Sudo getCustomers error:", json);
+      throw new HttpsError(
+        "internal",
+        json.message || `HTTP ${response.status}`,
+      );
     }
-  },
-);
+    return json;
+  } catch (err) {
+    if (err instanceof HttpsError) throw err;
+    console.error("Sudo getCustomers error:", err);
+    throw new HttpsError("internal", err.message);
+  }
+});
 
 // Get a single Sudo customer
-exports.sudoGetCustomer = onCall(
-  { secrets: [sudoApiKey] },
-  async (data) => {
-    await ensureVerifiedOrStandUser(data.auth);
-    const { customerId } = data.data;
-    if (!customerId) throw new HttpsError("invalid-argument", "customerId is required.");
+exports.sudoGetCustomer = onCall({ secrets: [sudoApiKey] }, async (data) => {
+  await ensureVerifiedOrStandUser(data.auth);
+  const { customerId } = data.data;
+  if (!customerId)
+    throw new HttpsError("invalid-argument", "customerId is required.");
 
-    const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
+  const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
+  if (!apiKey)
+    throw new HttpsError("internal", "Sudo API key is not configured.");
 
-    try {
-      const response = await sudoRequest({
-        url: `${SUDO_BASE_URL}/customers/${encodeURIComponent(customerId)}`,
-        method: "GET",
-        apiKey,
-      });
+  try {
+    const response = await sudoRequest({
+      url: `${SUDO_BASE_URL}/customers/${encodeURIComponent(customerId)}`,
+      method: "GET",
+      apiKey,
+    });
 
-      const json = await response.json();
-      console.log("Sudo getCustomer response:", JSON.stringify(json));
-      if (!response.ok) {
-        console.error("Sudo getCustomer error:", json);
-        throw new HttpsError("internal", json.message || `HTTP ${response.status}`);
-      }
-      return json;
-    } catch (err) {
-      if (err instanceof HttpsError) throw err;
-      console.error("Sudo getCustomer error:", err);
-      throw new HttpsError("internal", err.message);
+    const json = await response.json();
+    console.log("Sudo getCustomer response:", JSON.stringify(json));
+    if (!response.ok) {
+      console.error("Sudo getCustomer error:", json);
+      throw new HttpsError(
+        "internal",
+        json.message || `HTTP ${response.status}`,
+      );
     }
-  },
-);
+    return json;
+  } catch (err) {
+    if (err instanceof HttpsError) throw err;
+    console.error("Sudo getCustomer error:", err);
+    throw new HttpsError("internal", err.message);
+  }
+});
 
 // Update a Sudo customer
-exports.sudoUpdateCustomer = onCall(
-  { secrets: [sudoApiKey] },
-  async (data) => {
-    await ensureVerifiedOrStandUser(data.auth);
-    const { customerId, ...updateFields } = data.data;
-    if (!customerId) throw new HttpsError("invalid-argument", "customerId is required.");
+exports.sudoUpdateCustomer = onCall({ secrets: [sudoApiKey] }, async (data) => {
+  await ensureVerifiedOrStandUser(data.auth);
+  const { customerId, ...updateFields } = data.data;
+  if (!customerId)
+    throw new HttpsError("invalid-argument", "customerId is required.");
 
-    const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
+  const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
+  if (!apiKey)
+    throw new HttpsError("internal", "Sudo API key is not configured.");
 
-    try {
-      const response = await sudoRequest({
-        url: `${SUDO_BASE_URL}/customers/${encodeURIComponent(customerId)}`,
-        method: "PUT",
-        apiKey,
-        body: updateFields,
-      });
+  try {
+    const response = await sudoRequest({
+      url: `${SUDO_BASE_URL}/customers/${encodeURIComponent(customerId)}`,
+      method: "PUT",
+      apiKey,
+      body: updateFields,
+    });
 
-      const json = await response.json();
-      console.log("Sudo updateCustomer response:", JSON.stringify(json));
-      if (!response.ok) {
-        console.error("Sudo updateCustomer error:", json);
-        throw new HttpsError("internal", json.message || `HTTP ${response.status}`);
-      }
-      return json;
-    } catch (err) {
-      if (err instanceof HttpsError) throw err;
-      console.error("Sudo updateCustomer error:", err);
-      throw new HttpsError("internal", err.message);
+    const json = await response.json();
+    console.log("Sudo updateCustomer response:", JSON.stringify(json));
+    if (!response.ok) {
+      console.error("Sudo updateCustomer error:", json);
+      throw new HttpsError(
+        "internal",
+        json.message || `HTTP ${response.status}`,
+      );
     }
-  },
-);
+    return json;
+  } catch (err) {
+    if (err instanceof HttpsError) throw err;
+    console.error("Sudo updateCustomer error:", err);
+    throw new HttpsError("internal", err.message);
+  }
+});
 
 // ??? Funding Sources ???
 
@@ -11789,11 +13456,15 @@ exports.sudoCreateFundingSource = onCall(
     }
 
     const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
+    if (!apiKey)
+      throw new HttpsError("internal", "Sudo API key is not configured.");
 
     const body = { type, status };
     if (jitGateway) body.jitGateway = jitGateway;
-    console.log("[sudoCreateFundingSource] request body:", JSON.stringify(body));
+    console.log(
+      "[sudoCreateFundingSource] request body:",
+      JSON.stringify(body),
+    );
 
     try {
       const response = await sudoRequest({
@@ -11804,26 +13475,42 @@ exports.sudoCreateFundingSource = onCall(
       });
 
       const json = await response.json();
-      console.log(`[sudoCreateFundingSource] response status: ${response.status}`);
+      console.log(
+        `[sudoCreateFundingSource] response status: ${response.status}`,
+      );
       console.log("Sudo createFundingSource response:", JSON.stringify(json));
       if (!response.ok) {
         console.error("Sudo createFundingSource error:", json);
-        throw new HttpsError("internal", json.message || `HTTP ${response.status}`);
+        throw new HttpsError(
+          "internal",
+          json.message || `HTTP ${response.status}`,
+        );
       }
 
       // Persist created funding source for downstream card creation calls
       try {
         const createdFundingSourceId = json?.data?._id;
-        if (createdFundingSourceId && typeof createdFundingSourceId === "string") {
+        if (
+          createdFundingSourceId &&
+          typeof createdFundingSourceId === "string"
+        ) {
           await admin
             .firestore()
             .collection("company")
             .doc("sudoAccountDetails")
-            .set({ sudoFundingSourceId: createdFundingSourceId }, { merge: true });
-          console.log(`[sudoCreateFundingSource] Saved sudoFundingSourceId: ${createdFundingSourceId}`);
+            .set(
+              { sudoFundingSourceId: createdFundingSourceId },
+              { merge: true },
+            );
+          console.log(
+            `[sudoCreateFundingSource] Saved sudoFundingSourceId: ${createdFundingSourceId}`,
+          );
         }
       } catch (persistErr) {
-        console.warn("[sudoCreateFundingSource] Failed to persist sudoFundingSourceId:", persistErr.message);
+        console.warn(
+          "[sudoCreateFundingSource] Failed to persist sudoFundingSourceId:",
+          persistErr.message,
+        );
       }
 
       return json;
@@ -11842,7 +13529,8 @@ exports.sudoGetFundingSources = onCall(
     await ensureVerifiedOrStandUser(data.auth);
 
     const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
+    if (!apiKey)
+      throw new HttpsError("internal", "Sudo API key is not configured.");
 
     try {
       const response = await sudoRequest({
@@ -11855,7 +13543,10 @@ exports.sudoGetFundingSources = onCall(
       console.log("Sudo getFundingSources response:", JSON.stringify(json));
       if (!response.ok) {
         console.error("Sudo getFundingSources error:", json);
-        throw new HttpsError("internal", json.message || `HTTP ${response.status}`);
+        throw new HttpsError(
+          "internal",
+          json.message || `HTTP ${response.status}`,
+        );
       }
       return json;
     } catch (err) {
@@ -11872,10 +13563,12 @@ exports.sudoGetFundingSource = onCall(
   async (data) => {
     await ensureVerifiedOrStandUser(data.auth);
     const { fundingSourceId } = data.data;
-    if (!fundingSourceId) throw new HttpsError("invalid-argument", "fundingSourceId is required.");
+    if (!fundingSourceId)
+      throw new HttpsError("invalid-argument", "fundingSourceId is required.");
 
     const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
+    if (!apiKey)
+      throw new HttpsError("internal", "Sudo API key is not configured.");
 
     try {
       const response = await sudoRequest({
@@ -11888,7 +13581,10 @@ exports.sudoGetFundingSource = onCall(
       console.log("Sudo getFundingSource response:", JSON.stringify(json));
       if (!response.ok) {
         console.error("Sudo getFundingSource error:", json);
-        throw new HttpsError("internal", json.message || `HTTP ${response.status}`);
+        throw new HttpsError(
+          "internal",
+          json.message || `HTTP ${response.status}`,
+        );
       }
       return json;
     } catch (err) {
@@ -11905,10 +13601,12 @@ exports.sudoUpdateFundingSource = onCall(
   async (data) => {
     await ensureVerifiedOrStandUser(data.auth);
     const { fundingSourceId, status, jitGateway } = data.data;
-    if (!fundingSourceId) throw new HttpsError("invalid-argument", "fundingSourceId is required.");
+    if (!fundingSourceId)
+      throw new HttpsError("invalid-argument", "fundingSourceId is required.");
 
     const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
+    if (!apiKey)
+      throw new HttpsError("internal", "Sudo API key is not configured.");
 
     const body = {};
     if (status) body.status = status;
@@ -11926,7 +13624,10 @@ exports.sudoUpdateFundingSource = onCall(
       console.log("Sudo updateFundingSource response:", JSON.stringify(json));
       if (!response.ok) {
         console.error("Sudo updateFundingSource error:", json);
-        throw new HttpsError("internal", json.message || `HTTP ${response.status}`);
+        throw new HttpsError(
+          "internal",
+          json.message || `HTTP ${response.status}`,
+        );
       }
       return json;
     } catch (err) {
@@ -11940,100 +13641,112 @@ exports.sudoUpdateFundingSource = onCall(
 // ??? Cards ???
 
 // Create a card
-exports.sudoCreateCard = onCall(
-  { secrets: [sudoApiKey] },
-  async (data) => {
-    await ensureVerifiedOrStandUser(data.auth);
-    const {
-      customerId, type, currency, status, fundingSourceId,
-      brand, number, enable2FA, issuerCountry, metadata,
-      spendingControls, bankCode, accountNumber,
-      debitAccountId, amount, sendPINSMS, expirationDate,
-    } = data.data;
+exports.sudoCreateCard = onCall({ secrets: [sudoApiKey] }, async (data) => {
+  await ensureVerifiedOrStandUser(data.auth);
+  const {
+    customerId,
+    type,
+    currency,
+    status,
+    fundingSourceId,
+    brand,
+    number,
+    enable2FA,
+    issuerCountry,
+    metadata,
+    spendingControls,
+    bankCode,
+    accountNumber,
+    debitAccountId,
+    amount,
+    sendPINSMS,
+    expirationDate,
+  } = data.data;
 
-    if (!customerId || !type || !currency || !status) {
-      throw new HttpsError(
-        "invalid-argument",
-        "Missing required parameters: customerId, type, currency, status.",
-      );
+  if (!customerId || !type || !currency || !status) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Missing required parameters: customerId, type, currency, status.",
+    );
+  }
+
+  const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
+  if (!apiKey)
+    throw new HttpsError("internal", "Sudo API key is not configured.");
+
+  const body = { customerId, type, currency, status };
+  if (fundingSourceId) body.fundingSourceId = fundingSourceId;
+  if (brand) body.brand = brand;
+  if (number) body.number = number;
+  if (enable2FA !== undefined) body.enable2FA = enable2FA;
+  if (issuerCountry) body.issuerCountry = issuerCountry;
+  if (metadata) body.metadata = metadata;
+  if (spendingControls) body.spendingControls = spendingControls;
+  if (bankCode) body.bankCode = bankCode;
+  if (accountNumber) body.accountNumber = accountNumber;
+  if (debitAccountId) body.debitAccountId = debitAccountId;
+  if (amount !== undefined) body.amount = amount;
+  if (sendPINSMS !== undefined) body.sendPINSMS = sendPINSMS;
+  if (expirationDate) body.expirationDate = expirationDate;
+
+  try {
+    const response = await sudoRequest({
+      url: `${SUDO_BASE_URL}/cards`,
+      method: "POST",
+      apiKey,
+      body,
+    });
+
+    const json = await response.json();
+    console.log("Sudo createCard response:", JSON.stringify(json));
+    if (!response.ok) {
+      console.error("Sudo createCard error:", json);
+      return { error: true, statusCode: response.status, ...json };
     }
-
-    const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
-
-    const body = { customerId, type, currency, status };
-    if (fundingSourceId) body.fundingSourceId = fundingSourceId;
-    if (brand) body.brand = brand;
-    if (number) body.number = number;
-    if (enable2FA !== undefined) body.enable2FA = enable2FA;
-    if (issuerCountry) body.issuerCountry = issuerCountry;
-    if (metadata) body.metadata = metadata;
-    if (spendingControls) body.spendingControls = spendingControls;
-    if (bankCode) body.bankCode = bankCode;
-    if (accountNumber) body.accountNumber = accountNumber;
-    if (debitAccountId) body.debitAccountId = debitAccountId;
-    if (amount !== undefined) body.amount = amount;
-    if (sendPINSMS !== undefined) body.sendPINSMS = sendPINSMS;
-    if (expirationDate) body.expirationDate = expirationDate;
-
-    try {
-      const response = await sudoRequest({
-        url: `${SUDO_BASE_URL}/cards`,
-        method: "POST",
-        apiKey,
-        body,
-      });
-
-      const json = await response.json();
-      console.log("Sudo createCard response:", JSON.stringify(json));
-      if (!response.ok) {
-        console.error("Sudo createCard error:", json);
-        return { error: true, statusCode: response.status, ...json };
-      }
-      return json;
-    } catch (err) {
-      if (err instanceof HttpsError) throw err;
-      console.error("Sudo createCard error:", err);
-      throw new HttpsError("internal", err.message);
-    }
-  },
-);
+    return json;
+  } catch (err) {
+    if (err instanceof HttpsError) throw err;
+    console.error("Sudo createCard error:", err);
+    throw new HttpsError("internal", err.message);
+  }
+});
 
 // Get all cards
-exports.sudoGetCards = onCall(
-  { secrets: [sudoApiKey] },
-  async (data) => {
-    await ensureVerifiedOrStandUser(data.auth);
-    const { page, limit } = data.data || {};
+exports.sudoGetCards = onCall({ secrets: [sudoApiKey] }, async (data) => {
+  await ensureVerifiedOrStandUser(data.auth);
+  const { page, limit } = data.data || {};
 
-    const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
+  const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
+  if (!apiKey)
+    throw new HttpsError("internal", "Sudo API key is not configured.");
 
-    const params = new URLSearchParams();
-    if (page !== undefined) params.append("page", String(page));
-    if (limit !== undefined) params.append("limit", String(limit));
+  const params = new URLSearchParams();
+  if (page !== undefined) params.append("page", String(page));
+  if (limit !== undefined) params.append("limit", String(limit));
 
-    try {
-      const response = await sudoRequest({
-        url: `${SUDO_BASE_URL}/cards?${params.toString()}`,
-        method: "GET",
-        apiKey,
-      });
+  try {
+    const response = await sudoRequest({
+      url: `${SUDO_BASE_URL}/cards?${params.toString()}`,
+      method: "GET",
+      apiKey,
+    });
 
-      const json = await response.json();
-      console.log("Sudo getCards response:", JSON.stringify(json));
-      if (!response.ok) {
-        console.error("Sudo getCards error:", json);
-        throw new HttpsError("internal", json.message || `HTTP ${response.status}`);
-      }
-      return json;
-    } catch (err) {
-      if (err instanceof HttpsError) throw err;
-      console.error("Sudo getCards error:", err);
-      throw new HttpsError("internal", err.message);
+    const json = await response.json();
+    console.log("Sudo getCards response:", JSON.stringify(json));
+    if (!response.ok) {
+      console.error("Sudo getCards error:", json);
+      throw new HttpsError(
+        "internal",
+        json.message || `HTTP ${response.status}`,
+      );
     }
-  },
-);
+    return json;
+  } catch (err) {
+    if (err instanceof HttpsError) throw err;
+    console.error("Sudo getCards error:", err);
+    throw new HttpsError("internal", err.message);
+  }
+});
 
 // Get cards for a specific customer
 exports.sudoGetCustomerCards = onCall(
@@ -12041,10 +13754,12 @@ exports.sudoGetCustomerCards = onCall(
   async (data) => {
     await ensureVerifiedOrStandUser(data.auth);
     const { customerId, page, limit } = data.data;
-    if (!customerId) throw new HttpsError("invalid-argument", "customerId is required.");
+    if (!customerId)
+      throw new HttpsError("invalid-argument", "customerId is required.");
 
     const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
+    if (!apiKey)
+      throw new HttpsError("internal", "Sudo API key is not configured.");
 
     const params = new URLSearchParams();
     if (page !== undefined) params.append("page", String(page));
@@ -12061,7 +13776,10 @@ exports.sudoGetCustomerCards = onCall(
       console.log("Sudo getCustomerCards response:", JSON.stringify(json));
       if (!response.ok) {
         console.error("Sudo getCustomerCards error:", json);
-        throw new HttpsError("internal", json.message || `HTTP ${response.status}`);
+        throw new HttpsError(
+          "internal",
+          json.message || `HTTP ${response.status}`,
+        );
       }
       return json;
     } catch (err) {
@@ -12073,64 +13791,70 @@ exports.sudoGetCustomerCards = onCall(
 );
 
 // Get a single card
-exports.sudoGetCard = onCall(
-  { secrets: [sudoApiKey] },
-  async (data) => {
-    await ensureVerifiedOrStandUser(data.auth);
-    const { cardId } = data.data;
-    if (!cardId) throw new HttpsError("invalid-argument", "cardId is required.");
+exports.sudoGetCard = onCall({ secrets: [sudoApiKey] }, async (data) => {
+  await ensureVerifiedOrStandUser(data.auth);
+  const { cardId } = data.data;
+  if (!cardId) throw new HttpsError("invalid-argument", "cardId is required.");
 
-    const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
+  const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
+  if (!apiKey)
+    throw new HttpsError("internal", "Sudo API key is not configured.");
 
-    try {
-      const response = await sudoRequest({
-        url: `${SUDO_BASE_URL}/cards/${encodeURIComponent(cardId)}`,
-        method: "GET",
-        apiKey,
-      });
+  try {
+    const response = await sudoRequest({
+      url: `${SUDO_BASE_URL}/cards/${encodeURIComponent(cardId)}`,
+      method: "GET",
+      apiKey,
+    });
 
-      const json = await response.json();
-      console.log("Sudo getCard response:", JSON.stringify(json));
-      if (!response.ok) {
-        console.error("Sudo getCard error:", json);
-        throw new HttpsError("internal", json.message || `HTTP ${response.status}`);
-      }
-      return json;
-    } catch (err) {
-      if (err instanceof HttpsError) throw err;
-      console.error("Sudo getCard error:", err);
-      throw new HttpsError("internal", err.message);
+    const json = await response.json();
+    console.log("Sudo getCard response:", JSON.stringify(json));
+    if (!response.ok) {
+      console.error("Sudo getCard error:", json);
+      throw new HttpsError(
+        "internal",
+        json.message || `HTTP ${response.status}`,
+      );
     }
-  },
-);
+    return json;
+  } catch (err) {
+    if (err instanceof HttpsError) throw err;
+    console.error("Sudo getCard error:", err);
+    throw new HttpsError("internal", err.message);
+  }
+});
 
 // Fetch all Sudo accounts for this business (GET /accounts) ? used to recover lost account references
-exports.sudoGetAccounts = onCall(
-  { secrets: [sudoApiKey] },
-  async (data) => {
-    await ensureVerifiedOrStandUser(data.auth);
-    const { currency } = data.data || {};
-    const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
+exports.sudoGetAccounts = onCall({ secrets: [sudoApiKey] }, async (data) => {
+  await ensureVerifiedOrStandUser(data.auth);
+  const { currency } = data.data || {};
+  const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
+  if (!apiKey)
+    throw new HttpsError("internal", "Sudo API key is not configured.");
 
-    try {
-      const params = new URLSearchParams({ limit: "100", currency: currency || "ALL" });
-      const response = await sudoRequest({
-        url: `${SUDO_BASE_URL}/accounts?${params.toString()}`,
-        method: "GET",
-        apiKey,
-      });
-      const json = await response.json();
-      console.log("[sudoGetAccounts] Response:", JSON.stringify(json));
-      if (!response.ok) throw new HttpsError("internal", json.message || `HTTP ${response.status}`);
-      return json;
-    } catch (err) {
-      if (err instanceof HttpsError) throw err;
-      throw new HttpsError("internal", err.message);
-    }
-  },
-);
+  try {
+    const params = new URLSearchParams({
+      limit: "100",
+      currency: currency || "ALL",
+    });
+    const response = await sudoRequest({
+      url: `${SUDO_BASE_URL}/accounts?${params.toString()}`,
+      method: "GET",
+      apiKey,
+    });
+    const json = await response.json();
+    console.log("[sudoGetAccounts] Response:", JSON.stringify(json));
+    if (!response.ok)
+      throw new HttpsError(
+        "internal",
+        json.message || `HTTP ${response.status}`,
+      );
+    return json;
+  } catch (err) {
+    if (err instanceof HttpsError) throw err;
+    throw new HttpsError("internal", err.message);
+  }
+});
 
 // Fetch the real-time balance of a Sudo account (GET /accounts/{id}/balance)
 exports.sudoGetAccountBalance = onCall(
@@ -12138,10 +13862,12 @@ exports.sudoGetAccountBalance = onCall(
   async (data) => {
     await ensureVerifiedOrStandUser(data.auth);
     const { accountId } = data.data;
-    if (!accountId) throw new HttpsError("invalid-argument", "accountId is required.");
+    if (!accountId)
+      throw new HttpsError("invalid-argument", "accountId is required.");
 
     const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
+    if (!apiKey)
+      throw new HttpsError("internal", "Sudo API key is not configured.");
 
     try {
       const response = await sudoRequest({
@@ -12151,7 +13877,10 @@ exports.sudoGetAccountBalance = onCall(
       });
       const json = await response.json();
       if (!response.ok) {
-        throw new HttpsError("internal", json.message || `HTTP ${response.status}`);
+        throw new HttpsError(
+          "internal",
+          json.message || `HTTP ${response.status}`,
+        );
       }
       return json;
     } catch (err) {
@@ -12170,10 +13899,12 @@ exports.sudoGenerateCardToken = onCall(
   async (data) => {
     await ensureVerifiedOrStandUser(data.auth);
     const { cardId } = data.data;
-    if (!cardId) throw new HttpsError("invalid-argument", "cardId is required.");
+    if (!cardId)
+      throw new HttpsError("invalid-argument", "cardId is required.");
 
     const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
+    if (!apiKey)
+      throw new HttpsError("internal", "Sudo API key is not configured.");
 
     try {
       const response = await sudoRequest({
@@ -12183,7 +13914,10 @@ exports.sudoGenerateCardToken = onCall(
       });
       const json = await response.json();
       if (!response.ok || (json.statusCode && json.statusCode >= 400)) {
-        throw new HttpsError("internal", json.message || `HTTP ${response.status}`);
+        throw new HttpsError(
+          "internal",
+          json.message || `HTTP ${response.status}`,
+        );
       }
       // Return only the token ? not the full API key
       return { token: json.data?.token };
@@ -12201,10 +13935,12 @@ exports.sudoSendDefaultCardPin = onCall(
   async (data) => {
     await ensureVerifiedOrStandUser(data.auth);
     const { cardId } = data.data;
-    if (!cardId) throw new HttpsError("invalid-argument", "cardId is required.");
+    if (!cardId)
+      throw new HttpsError("invalid-argument", "cardId is required.");
 
     const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
+    if (!apiKey)
+      throw new HttpsError("internal", "Sudo API key is not configured.");
 
     try {
       const response = await sudoRequest({
@@ -12217,7 +13953,10 @@ exports.sudoSendDefaultCardPin = onCall(
       console.log("Sudo sendDefaultCardPin response:", JSON.stringify(json));
       if (!response.ok) {
         console.error("Sudo sendDefaultCardPin error:", json);
-        throw new HttpsError("internal", json.message || `HTTP ${response.status}`);
+        throw new HttpsError(
+          "internal",
+          json.message || `HTTP ${response.status}`,
+        );
       }
       return json;
     } catch (err) {
@@ -12229,227 +13968,247 @@ exports.sudoSendDefaultCardPin = onCall(
 );
 
 // Change card PIN
-exports.sudoChangeCardPin = onCall(
-  { secrets: [sudoApiKey] },
-  async (data) => {
-    await ensureVerifiedOrStandUser(data.auth);
-    const { cardId, oldPin, newPin } = data.data;
-    if (!cardId || !oldPin || !newPin) {
-      throw new HttpsError("invalid-argument", "cardId, oldPin, and newPin are required.");
+exports.sudoChangeCardPin = onCall({ secrets: [sudoApiKey] }, async (data) => {
+  await ensureVerifiedOrStandUser(data.auth);
+  const { cardId, oldPin, newPin } = data.data;
+  if (!cardId || !oldPin || !newPin) {
+    throw new HttpsError(
+      "invalid-argument",
+      "cardId, oldPin, and newPin are required.",
+    );
+  }
+
+  const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
+  if (!apiKey)
+    throw new HttpsError("internal", "Sudo API key is not configured.");
+
+  try {
+    const response = await sudoRequest({
+      url: `${SUDO_BASE_URL}/cards/${encodeURIComponent(cardId)}/pin`,
+      method: "PUT",
+      apiKey,
+      body: { oldPin, newPin },
+    });
+
+    const json = await response.json();
+    console.log("Sudo changeCardPin response:", JSON.stringify(json));
+    if (!response.ok) {
+      console.error("Sudo changeCardPin error:", json);
+      throw new HttpsError(
+        "internal",
+        json.message || `HTTP ${response.status}`,
+      );
     }
-
-    const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
-
-    try {
-      const response = await sudoRequest({
-        url: `${SUDO_BASE_URL}/cards/${encodeURIComponent(cardId)}/pin`,
-        method: "PUT",
-        apiKey,
-        body: { oldPin, newPin },
-      });
-
-      const json = await response.json();
-      console.log("Sudo changeCardPin response:", JSON.stringify(json));
-      if (!response.ok) {
-        console.error("Sudo changeCardPin error:", json);
-        throw new HttpsError("internal", json.message || `HTTP ${response.status}`);
-      }
-      return json;
-    } catch (err) {
-      if (err instanceof HttpsError) throw err;
-      console.error("Sudo changeCardPin error:", err);
-      throw new HttpsError("internal", err.message);
-    }
-  },
-);
+    return json;
+  } catch (err) {
+    if (err instanceof HttpsError) throw err;
+    console.error("Sudo changeCardPin error:", err);
+    throw new HttpsError("internal", err.message);
+  }
+});
 
 // Enroll card for 2FA
-exports.sudoEnrollCard2FA = onCall(
-  { secrets: [sudoApiKey] },
-  async (data) => {
-    await ensureVerifiedOrStandUser(data.auth);
-    const { cardId } = data.data;
-    if (!cardId) throw new HttpsError("invalid-argument", "cardId is required.");
+exports.sudoEnrollCard2FA = onCall({ secrets: [sudoApiKey] }, async (data) => {
+  await ensureVerifiedOrStandUser(data.auth);
+  const { cardId } = data.data;
+  if (!cardId) throw new HttpsError("invalid-argument", "cardId is required.");
 
-    const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
+  const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
+  if (!apiKey)
+    throw new HttpsError("internal", "Sudo API key is not configured.");
 
-    try {
-      const response = await sudoRequest({
-        url: `${SUDO_BASE_URL}/cards/${encodeURIComponent(cardId)}/enroll2fa`,
-        method: "PUT",
-        apiKey,
-      });
+  try {
+    const response = await sudoRequest({
+      url: `${SUDO_BASE_URL}/cards/${encodeURIComponent(cardId)}/enroll2fa`,
+      method: "PUT",
+      apiKey,
+    });
 
-      const json = await response.json();
-      console.log("Sudo enrollCard2FA response:", JSON.stringify(json));
-      if (!response.ok) {
-        console.error("Sudo enrollCard2FA error:", json);
-        throw new HttpsError("internal", json.message || `HTTP ${response.status}`);
-      }
-      return json;
-    } catch (err) {
-      if (err instanceof HttpsError) throw err;
-      console.error("Sudo enrollCard2FA error:", err);
-      throw new HttpsError("internal", err.message);
+    const json = await response.json();
+    console.log("Sudo enrollCard2FA response:", JSON.stringify(json));
+    if (!response.ok) {
+      console.error("Sudo enrollCard2FA error:", json);
+      throw new HttpsError(
+        "internal",
+        json.message || `HTTP ${response.status}`,
+      );
     }
-  },
-);
+    return json;
+  } catch (err) {
+    if (err instanceof HttpsError) throw err;
+    console.error("Sudo enrollCard2FA error:", err);
+    throw new HttpsError("internal", err.message);
+  }
+});
 
 // Update a card
-exports.sudoUpdateCard = onCall(
-  { secrets: [sudoApiKey] },
-  async (data) => {
-    await ensureVerifiedOrStandUser(data.auth);
-    const { cardId, ...updateFields } = data.data;
-    if (!cardId) throw new HttpsError("invalid-argument", "cardId is required.");
+exports.sudoUpdateCard = onCall({ secrets: [sudoApiKey] }, async (data) => {
+  await ensureVerifiedOrStandUser(data.auth);
+  const { cardId, ...updateFields } = data.data;
+  if (!cardId) throw new HttpsError("invalid-argument", "cardId is required.");
 
-    const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
+  const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
+  if (!apiKey)
+    throw new HttpsError("internal", "Sudo API key is not configured.");
 
-    try {
-      const response = await sudoRequest({
-        url: `${SUDO_BASE_URL}/cards/${encodeURIComponent(cardId)}`,
-        method: "PUT",
-        apiKey,
-        body: updateFields,
-      });
+  try {
+    const response = await sudoRequest({
+      url: `${SUDO_BASE_URL}/cards/${encodeURIComponent(cardId)}`,
+      method: "PUT",
+      apiKey,
+      body: updateFields,
+    });
 
-      const json = await response.json();
-      console.log("Sudo updateCard response:", JSON.stringify(json));
-      if (!response.ok) {
-        console.error("Sudo updateCard error:", json);
-        throw new HttpsError("internal", json.message || `HTTP ${response.status}`);
-      }
-      return json;
-    } catch (err) {
-      if (err instanceof HttpsError) throw err;
-      console.error("Sudo updateCard error:", err);
-      throw new HttpsError("internal", err.message);
+    const json = await response.json();
+    console.log("Sudo updateCard response:", JSON.stringify(json));
+    if (!response.ok) {
+      console.error("Sudo updateCard error:", json);
+      throw new HttpsError(
+        "internal",
+        json.message || `HTTP ${response.status}`,
+      );
     }
-  },
-);
+    return json;
+  } catch (err) {
+    if (err instanceof HttpsError) throw err;
+    console.error("Sudo updateCard error:", err);
+    throw new HttpsError("internal", err.message);
+  }
+});
 
 // Digitalize a card
-exports.sudoDigitalizeCard = onCall(
-  { secrets: [sudoApiKey] },
-  async (data) => {
-    await ensureVerifiedOrStandUser(data.auth);
-    const { cardId } = data.data;
-    const platform = String(data.data?.platform || "android").trim().toLowerCase();
-    if (!cardId) throw new HttpsError("invalid-argument", "cardId is required.");
+exports.sudoDigitalizeCard = onCall({ secrets: [sudoApiKey] }, async (data) => {
+  await ensureVerifiedOrStandUser(data.auth);
+  const { cardId } = data.data;
+  const platform = String(data.data?.platform || "android")
+    .trim()
+    .toLowerCase();
+  if (!cardId) throw new HttpsError("invalid-argument", "cardId is required.");
 
-    const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
+  const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
+  if (!apiKey)
+    throw new HttpsError("internal", "Sudo API key is not configured.");
 
-    try {
-      const tryDigitalize = async (targetCardId) => {
-        const response = await sudoRequest({
-          url: `${SUDO_BASE_URL}/cards/digitalize/${encodeURIComponent(targetCardId)}`,
-          method: "PUT",
-          apiKey,
-          body: {platform},
-        });
-        const json = await response.json();
-        return {response, json};
-      };
+  try {
+    const tryDigitalize = async (targetCardId) => {
+      const response = await sudoRequest({
+        url: `${SUDO_BASE_URL}/cards/digitalize/${encodeURIComponent(targetCardId)}`,
+        method: "PUT",
+        apiKey,
+        body: { platform },
+      });
+      const json = await response.json();
+      return { response, json };
+    };
 
-      let effectiveCardId = cardId;
-      let matchedCard = null;
-      let {response, json} = await tryDigitalize(effectiveCardId);
+    let effectiveCardId = cardId;
+    let matchedCard = null;
+    let { response, json } = await tryDigitalize(effectiveCardId);
 
-      // Some Sudo accounts may require digitalization by providerReference
-      // instead of card _id. If we get "Card not found", resolve and retry.
-      const isCardNotFound =
-        !response.ok &&
-        String(json?.message || "").toLowerCase().includes("card not found");
+    // Some Sudo accounts may require digitalization by providerReference
+    // instead of card _id. If we get "Card not found", resolve and retry.
+    const isCardNotFound =
+      !response.ok &&
+      String(json?.message || "")
+        .toLowerCase()
+        .includes("card not found");
 
-      if (isCardNotFound) {
-        const cardsResponse = await sudoRequest({
-          url: `${SUDO_BASE_URL}/cards?limit=100`,
-          method: "GET",
-          apiKey,
-        });
-        const cardsJson = await cardsResponse.json();
-        const cards = Array.isArray(cardsJson?.data) ? cardsJson.data : [];
+    if (isCardNotFound) {
+      const cardsResponse = await sudoRequest({
+        url: `${SUDO_BASE_URL}/cards?limit=100`,
+        method: "GET",
+        apiKey,
+      });
+      const cardsJson = await cardsResponse.json();
+      const cards = Array.isArray(cardsJson?.data) ? cardsJson.data : [];
 
-        const match = cards.find((c) => {
-          const id = String(c?._id || "");
-          const providerRef = String(c?.providerReference || "");
-          return id === String(cardId) || providerRef === String(cardId);
-        });
-        matchedCard = match || null;
+      const match = cards.find((c) => {
+        const id = String(c?._id || "");
+        const providerRef = String(c?.providerReference || "");
+        return id === String(cardId) || providerRef === String(cardId);
+      });
+      matchedCard = match || null;
 
-        if (match) {
-          const matchStatus = String(match?.status || "").toLowerCase();
-          if (matchStatus && matchStatus !== "active") {
-            throw new HttpsError(
-              "failed-precondition",
-              `Card exists but is ${matchStatus}. Activate card before digitalization.`,
-            );
-          }
+      if (match) {
+        const matchStatus = String(match?.status || "").toLowerCase();
+        if (matchStatus && matchStatus !== "active") {
+          throw new HttpsError(
+            "failed-precondition",
+            `Card exists but is ${matchStatus}. Activate card before digitalization.`,
+          );
+        }
 
-          const byProviderRef = String(match?.providerReference || "").trim();
-          if (byProviderRef && byProviderRef !== String(cardId)) {
-            effectiveCardId = byProviderRef;
-            const retry = await tryDigitalize(effectiveCardId);
-            response = retry.response;
-            json = retry.json;
-          }
+        const byProviderRef = String(match?.providerReference || "").trim();
+        if (byProviderRef && byProviderRef !== String(cardId)) {
+          effectiveCardId = byProviderRef;
+          const retry = await tryDigitalize(effectiveCardId);
+          response = retry.response;
+          json = retry.json;
         }
       }
+    }
 
-      console.log("Sudo digitalizeCard response:", JSON.stringify({
+    console.log(
+      "Sudo digitalizeCard response:",
+      JSON.stringify({
         effectiveCardId,
         responseStatus: response.status,
         body: json,
-      }));
+      }),
+    );
 
-      if (!response.ok) {
-        console.error("Sudo digitalizeCard error:", json);
-        throw new HttpsError("internal", json.message || `HTTP ${response.status}`);
-      }
+    if (!response.ok) {
+      console.error("Sudo digitalizeCard error:", json);
+      throw new HttpsError(
+        "internal",
+        json.message || `HTTP ${response.status}`,
+      );
+    }
 
-      const payload = (json && typeof json === "object") ? (json.data || json) : {};
-      const registrationData = payload?.registrationData || payload?.registration || payload?.onboardingData || {};
+    const payload = json && typeof json === "object" ? json.data || json : {};
+    const registrationData =
+      payload?.registrationData ||
+      payload?.registration ||
+      payload?.onboardingData ||
+      {};
 
-      const asString = (v) => (typeof v === "string" ? v.trim() : "");
+    const asString = (v) => (typeof v === "string" ? v.trim() : "");
 
-      const jwtToken =
-        asString(payload?.jwtToken) ||
-        asString(payload?.jwt_token) ||
-        asString(payload?.token) ||
-        asString(payload?.onboardingToken) ||
-        asString(payload?.onboarding_token) ||
-        asString(payload?.digitalizationToken) ||
-        asString(payload?.digitalization_token) ||
-        asString(registrationData?.jwtToken) ||
-        asString(registrationData?.jwt_token) ||
-        asString(registrationData?.token) ||
-        asString(registrationData?.onboardingToken) ||
-        asString(registrationData?.onboarding_token);
+    const jwtToken =
+      asString(payload?.jwtToken) ||
+      asString(payload?.jwt_token) ||
+      asString(payload?.token) ||
+      asString(payload?.onboardingToken) ||
+      asString(payload?.onboarding_token) ||
+      asString(payload?.digitalizationToken) ||
+      asString(payload?.digitalization_token) ||
+      asString(registrationData?.jwtToken) ||
+      asString(registrationData?.jwt_token) ||
+      asString(registrationData?.token) ||
+      asString(registrationData?.onboardingToken) ||
+      asString(registrationData?.onboarding_token);
 
-      const walletId =
-        asString(payload?.walletId) ||
-        asString(payload?.wallet_id) ||
-        asString(registrationData?.walletId) ||
-        asString(registrationData?.wallet_id);
+    const walletId =
+      asString(payload?.walletId) ||
+      asString(payload?.wallet_id) ||
+      asString(registrationData?.walletId) ||
+      asString(registrationData?.wallet_id);
 
-      const paymentAppInstanceId =
-        asString(payload?.paymentAppInstanceId) ||
-        asString(payload?.payment_app_instance_id) ||
-        asString(registrationData?.paymentAppInstanceId) ||
-        asString(registrationData?.payment_app_instance_id);
+    const paymentAppInstanceId =
+      asString(payload?.paymentAppInstanceId) ||
+      asString(payload?.payment_app_instance_id) ||
+      asString(registrationData?.paymentAppInstanceId) ||
+      asString(registrationData?.payment_app_instance_id);
 
-      const accountId =
-        asString(payload?.accountId) ||
-        asString(payload?.account_id) ||
-        asString(registrationData?.accountId) ||
-        asString(registrationData?.account_id) ||
-        cardId;
+    const accountId =
+      asString(payload?.accountId) ||
+      asString(payload?.account_id) ||
+      asString(registrationData?.accountId) ||
+      asString(registrationData?.account_id) ||
+      cardId;
 
-      const candidatesSet = new Set([
+    const candidatesSet = new Set(
+      [
         asString(cardId),
         asString(effectiveCardId),
         asString(payload?.cardId),
@@ -12459,26 +14218,26 @@ exports.sudoDigitalizeCard = onCall(
         asString(matchedCard?.providerReference),
         asString(matchedCard?.account?._id),
         asString(matchedCard?.account?.providerReference),
-      ].filter(Boolean));
+      ].filter(Boolean),
+    );
 
-      const accountIdCandidates = Array.from(candidatesSet);
+    const accountIdCandidates = Array.from(candidatesSet);
 
-      return {
-        ok: true,
-        walletId,
-        paymentAppInstanceId,
-        accountId,
-        accountIdCandidates,
-        jwtToken,
-        data: payload,
-      };
-    } catch (err) {
-      if (err instanceof HttpsError) throw err;
-      console.error("Sudo digitalizeCard error:", err);
-      throw new HttpsError("internal", err.message);
-    }
-  },
-);
+    return {
+      ok: true,
+      walletId,
+      paymentAppInstanceId,
+      accountId,
+      accountIdCandidates,
+      jwtToken,
+      data: payload,
+    };
+  } catch (err) {
+    if (err instanceof HttpsError) throw err;
+    console.error("Sudo digitalizeCard error:", err);
+    throw new HttpsError("internal", err.message);
+  }
+});
 
 // Order physical cards
 exports.sudoOrderPhysicalCards = onCall(
@@ -12486,12 +14245,27 @@ exports.sudoOrderPhysicalCards = onCall(
   async (data) => {
     await ensureVerifiedOrStandUser(data.auth);
     const {
-      debitAccountId, brand, currency, allocation, expedite,
-      shippingMethod, shippingAddress, customerId, design, nameOnCards,
+      debitAccountId,
+      brand,
+      currency,
+      allocation,
+      expedite,
+      shippingMethod,
+      shippingAddress,
+      customerId,
+      design,
+      nameOnCards,
     } = data.data;
 
-    if (!debitAccountId || !brand || !currency || allocation === undefined ||
-        expedite === undefined || !shippingMethod || !shippingAddress) {
+    if (
+      !debitAccountId ||
+      !brand ||
+      !currency ||
+      allocation === undefined ||
+      expedite === undefined ||
+      !shippingMethod ||
+      !shippingAddress
+    ) {
       throw new HttpsError(
         "invalid-argument",
         "Missing required parameters for ordering physical cards.",
@@ -12499,11 +14273,17 @@ exports.sudoOrderPhysicalCards = onCall(
     }
 
     const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
+    if (!apiKey)
+      throw new HttpsError("internal", "Sudo API key is not configured.");
 
     const body = {
-      debitAccountId, brand, currency, allocation,
-      expedite, shippingMethod, shippingAddress,
+      debitAccountId,
+      brand,
+      currency,
+      allocation,
+      expedite,
+      shippingMethod,
+      shippingAddress,
     };
     if (customerId) body.customerId = customerId;
     if (design) body.design = design;
@@ -12521,7 +14301,10 @@ exports.sudoOrderPhysicalCards = onCall(
       console.log("Sudo orderPhysicalCards response:", JSON.stringify(json));
       if (!response.ok) {
         console.error("Sudo orderPhysicalCards error:", json);
-        throw new HttpsError("internal", json.message || `HTTP ${response.status}`);
+        throw new HttpsError(
+          "internal",
+          json.message || `HTTP ${response.status}`,
+        );
       }
       return json;
     } catch (err) {
@@ -12538,10 +14321,12 @@ exports.sudoGetCardTransactions = onCall(
   async (data) => {
     await ensureVerifiedOrStandUser(data.auth);
     const { cardId, page, limit, fromDate, toDate } = data.data;
-    if (!cardId) throw new HttpsError("invalid-argument", "cardId is required.");
+    if (!cardId)
+      throw new HttpsError("invalid-argument", "cardId is required.");
 
     const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
-    if (!apiKey) throw new HttpsError("internal", "Sudo API key is not configured.");
+    if (!apiKey)
+      throw new HttpsError("internal", "Sudo API key is not configured.");
 
     const params = new URLSearchParams();
     if (page !== undefined) params.append("page", String(page));
@@ -12560,7 +14345,10 @@ exports.sudoGetCardTransactions = onCall(
       console.log("Sudo getCardTransactions response:", JSON.stringify(json));
       if (!response.ok) {
         console.error("Sudo getCardTransactions error:", json);
-        throw new HttpsError("internal", json.message || `HTTP ${response.status}`);
+        throw new HttpsError(
+          "internal",
+          json.message || `HTTP ${response.status}`,
+        );
       }
       return json;
     } catch (err) {
@@ -12575,13 +14363,24 @@ exports.sudoGetCardTransactions = onCall(
 // Events: authorization.request, card.balance, transaction.created,
 //         authorization.declined, transaction.refund, card.terminated
 exports.sudoWebhook = onRequest(
-  { secrets: [sudoWebhookSecret, getanchorSecretKey, smtpHost, smtpUser, smtpPass] },
+  {
+    secrets: [
+      sudoWebhookSecret,
+      getanchorSecretKey,
+      smtpHost,
+      smtpUser,
+      smtpPass,
+    ],
+  },
   async (req, res) => {
     if (req.method !== "POST") {
       res.status(405).send("Method Not Allowed");
       return;
     }
-    console.log("[sudoWebhook] Received request with headers:", JSON.stringify(req.headers));
+    console.log(
+      "[sudoWebhook] Received request with headers:",
+      JSON.stringify(req.headers),
+    );
 
     const payload = req.body || {};
     const eventType = payload?.type || "unknown";
@@ -12595,9 +14394,16 @@ exports.sudoWebhook = onRequest(
     const findUserByCardId = async (sudoCardId) => {
       if (!sudoCardId) return null;
       try {
-        const snap = await db.collectionGroup("cards").where("card_id", "==", sudoCardId).limit(1).get();
+        const snap = await db
+          .collectionGroup("cards")
+          .where("card_id", "==", sudoCardId)
+          .limit(1)
+          .get();
         if (snap.empty) return null;
-        return { userId: snap.docs[0].ref.parent.parent.id, cardDoc: snap.docs[0] };
+        return {
+          userId: snap.docs[0].ref.parent.parent.id,
+          cardDoc: snap.docs[0],
+        };
       } catch (e) {
         console.warn("[sudoWebhook] findUserByCardId error:", e);
         return null;
@@ -12605,17 +14411,31 @@ exports.sudoWebhook = onRequest(
     };
 
     // Push notification + Firestore notification save.
-    const notifyUser = async (userId, title, body, type = "card", emailHtml = null) => {
+    const notifyUser = async (
+      userId,
+      title,
+      body,
+      type = "card",
+      emailHtml = null,
+    ) => {
       try {
         const userSnap = await db.collection("users").doc(userId).get();
         const userData = userSnap.data() || {};
         const token = userData.deviceToken;
-        if (token) await admin.messaging().send({ token, notification: { title, body }, ...FCM_CHANNEL });
+        if (token)
+          await admin
+            .messaging()
+            .send({ token, notification: { title, body }, ...FCM_CHANNEL });
         // Send email
         const email = userData.email;
         if (email) {
           const html = emailHtml || `<p>${body}</p>`;
-          await sendNotifyEmail({ to: email, subject: title, html, text: body });
+          await sendNotifyEmail({
+            to: email,
+            subject: title,
+            html,
+            text: body,
+          });
         }
       } catch (e) {
         console.warn("[sudoWebhook] push/email error:", e);
@@ -12627,7 +14447,8 @@ exports.sudoWebhook = onRequest(
     const getAnchorBalanceKobo = async (userId) => {
       try {
         const userSnap = await db.collection("users").doc(userId).get();
-        const accountId = userSnap.data()?.getAnchorData?.virtualAccount?.data?.id;
+        const accountId =
+          userSnap.data()?.getAnchorData?.virtualAccount?.data?.id;
         if (!accountId) return null;
         const json = await makeApiRequest({
           url: `${BASE_URL}/accounts/balance/${encodeURIComponent(accountId)}`,
@@ -12643,10 +14464,14 @@ exports.sudoWebhook = onRequest(
 
     // Save raw event for debugging.
     const saveRaw = () =>
-      db.collection("sudo_webhooks").add({
-        eventType, payload,
-        receivedAt: admin.firestore.FieldValue.serverTimestamp(),
-      }).catch(() => {});
+      db
+        .collection("sudo_webhooks")
+        .add({
+          eventType,
+          payload,
+          receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+        })
+        .catch(() => {});
 
     try {
       saveRaw();
@@ -12655,13 +14480,19 @@ exports.sudoWebhook = onRequest(
       // Must respond synchronously: approve ("00") or decline ("51").
       if (eventType === "authorization.request") {
         const sudoCardId = eventObject?.card?._id || eventObject?.card;
-        const pendingAmount = eventObject?.pendingRequest?.amount ?? eventObject?.amount ?? 0;
+        const pendingAmount =
+          eventObject?.pendingRequest?.amount ?? eventObject?.amount ?? 0;
         const currency = (eventObject?.currency || "NGN").toUpperCase();
 
         const found = await findUserByCardId(sudoCardId);
         if (!found) {
-          console.warn("[sudoWebhook] authorization.request: card not found:", sudoCardId);
-          return res.status(200).json({ statusCode: 200, data: { responseCode: "14" } }); // Invalid card
+          console.warn(
+            "[sudoWebhook] authorization.request: card not found:",
+            sudoCardId,
+          );
+          return res
+            .status(200)
+            .json({ statusCode: 200, data: { responseCode: "14" } }); // Invalid card
         }
 
         // Check if the card is frozen by the user
@@ -12669,72 +14500,139 @@ exports.sudoWebhook = onRequest(
 
         // Decline all transactions on terminated/deleted cards
         if (cardData.deleted === true) {
-          const displayAmountDel = currency === "NGN"
-            ? `?${pendingAmount.toLocaleString("en-NG", {minimumFractionDigits: 2, maximumFractionDigits: 2})}`
-            : `$${pendingAmount.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+          const displayAmountDel =
+            currency === "NGN"
+              ? `?${pendingAmount.toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+              : `$${pendingAmount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
           const merchantDel = eventObject?.merchant?.name || "Unknown merchant";
-          console.log(`[sudoWebhook] Auth DECLINED (card terminated) ? card:${sudoCardId}`);
-          await notifyUser(found.userId, "Transaction Declined", `A ${displayAmountDel} payment at ${merchantDel} was declined. This card has been terminated.`, "card_declined");
+          console.log(
+            `[sudoWebhook] Auth DECLINED (card terminated) ? card:${sudoCardId}`,
+          );
+          await notifyUser(
+            found.userId,
+            "Transaction Declined",
+            `A ${displayAmountDel} payment at ${merchantDel} was declined. This card has been terminated.`,
+            "card_declined",
+          );
           if (eventObject?._id) {
-            await db.collection("sudo_declined_auths").doc(eventObject._id).set({ declinedAt: admin.firestore.FieldValue.serverTimestamp(), declineReason: "card_terminated" });
-            await db.collection("users").doc(found.userId).collection("transactions").doc(eventObject._id).set({
-              type: "card_declined", source: "sudo_card", amount: pendingAmount, currency,
-              merchant: merchantDel, cardId: sudoCardId, declineReason: "card_terminated",
-              status: "declined", sudoEventId: eventObject._id,
-              timestamp: admin.firestore.FieldValue.serverTimestamp(),
-            });
+            await db
+              .collection("sudo_declined_auths")
+              .doc(eventObject._id)
+              .set({
+                declinedAt: admin.firestore.FieldValue.serverTimestamp(),
+                declineReason: "card_terminated",
+              });
+            await db
+              .collection("users")
+              .doc(found.userId)
+              .collection("transactions")
+              .doc(eventObject._id)
+              .set({
+                type: "card_declined",
+                source: "sudo_card",
+                amount: pendingAmount,
+                currency,
+                merchant: merchantDel,
+                cardId: sudoCardId,
+                declineReason: "card_terminated",
+                status: "declined",
+                sudoEventId: eventObject._id,
+                timestamp: admin.firestore.FieldValue.serverTimestamp(),
+              });
           }
-          return res.status(200).json({ statusCode: 200, data: { responseCode: "14" } }); // Invalid card number
+          return res
+            .status(200)
+            .json({ statusCode: 200, data: { responseCode: "14" } }); // Invalid card number
         }
 
         if (cardData.frozen === true) {
-          const displayAmount = currency === "NGN"
-            ? `?${pendingAmount.toLocaleString('en-NG', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`
-            : `$${pendingAmount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+          const displayAmount =
+            currency === "NGN"
+              ? `?${pendingAmount.toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+              : `$${pendingAmount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
           const merchant = eventObject?.merchant?.name || "Unknown merchant";
-          console.log(`[sudoWebhook] Auth DECLINED (frozen) ? card:${sudoCardId} amount:${pendingAmount} ${currency}`);
+          console.log(
+            `[sudoWebhook] Auth DECLINED (frozen) ? card:${sudoCardId} amount:${pendingAmount} ${currency}`,
+          );
           const frozenEmailHtml = `<div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:24px;"><h2 style="color:#c62828;">Card Frozen ? Transaction Declined</h2><p>A <strong>${displayAmount}</strong> payment at <strong>${merchant}</strong> was blocked because your virtual card is frozen.</p><p>To unfreeze your card, open PadiPay &rarr; Cards &rarr; tap your card &rarr; tap <em>Unfreeze Card</em>.</p><p style="color:#888;font-size:12px;">If you did not freeze your card, contact support immediately.</p></div>`;
           await notifyUser(
             found.userId,
             "Card Frozen ? Transaction Declined",
             `A ${displayAmount} transaction at ${merchant} was declined because your card is frozen.`,
             "card_declined",
-            frozenEmailHtml
+            frozenEmailHtml,
           );
           if (eventObject?._id) {
-            await db.collection("sudo_declined_auths").doc(eventObject._id).set({ declinedAt: admin.firestore.FieldValue.serverTimestamp(), declineReason: "card_frozen" });
-            await db.collection("users").doc(found.userId).collection("transactions").doc(eventObject._id).set({
-              type: "card_declined", source: "sudo_card", amount: pendingAmount, currency,
-              merchant, cardId: sudoCardId, declineReason: "card_frozen",
-              status: "declined", sudoEventId: eventObject._id,
-              timestamp: admin.firestore.FieldValue.serverTimestamp(),
-            });
+            await db
+              .collection("sudo_declined_auths")
+              .doc(eventObject._id)
+              .set({
+                declinedAt: admin.firestore.FieldValue.serverTimestamp(),
+                declineReason: "card_frozen",
+              });
+            await db
+              .collection("users")
+              .doc(found.userId)
+              .collection("transactions")
+              .doc(eventObject._id)
+              .set({
+                type: "card_declined",
+                source: "sudo_card",
+                amount: pendingAmount,
+                currency,
+                merchant,
+                cardId: sudoCardId,
+                declineReason: "card_frozen",
+                status: "declined",
+                sudoEventId: eventObject._id,
+                timestamp: admin.firestore.FieldValue.serverTimestamp(),
+              });
           }
-          return res.status(200).json({ statusCode: 200, data: { responseCode: "62" } }); // Restricted card
+          return res
+            .status(200)
+            .json({ statusCode: 200, data: { responseCode: "62" } }); // Restricted card
         }
 
         // Check card channel restrictions (pos / atm / web)
-        const txChannel = (eventObject?.transactionMetadata?.channel ||
-          eventObject?.terminal?.terminalType || "").toLowerCase();
+        const txChannel = (
+          eventObject?.transactionMetadata?.channel ||
+          eventObject?.terminal?.terminalType ||
+          ""
+        ).toLowerCase();
         const channels = cardData.channels || {};
         // Default: all channels allowed. Only block if explicitly set to false.
         let channelAllowed = true;
         let channelLabel = txChannel;
-        if (txChannel === "pos" && channels.pos === false) channelAllowed = false;
-        else if (txChannel === "atm" && channels.atm === false) channelAllowed = false;
-        else if ((txChannel === "web" || txChannel === "internet" || txChannel === "ecommerce") && channels.web === false) {
+        if (txChannel === "pos" && channels.pos === false)
+          channelAllowed = false;
+        else if (txChannel === "atm" && channels.atm === false)
+          channelAllowed = false;
+        else if (
+          (txChannel === "web" ||
+            txChannel === "internet" ||
+            txChannel === "ecommerce") &&
+          channels.web === false
+        ) {
           channelAllowed = false;
           channelLabel = "web";
         }
 
         if (!channelAllowed) {
-          const displayAmount = currency === "NGN"
-            ? `?${pendingAmount.toLocaleString('en-NG', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`
-            : `$${pendingAmount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+          const displayAmount =
+            currency === "NGN"
+              ? `?${pendingAmount.toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+              : `$${pendingAmount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
           const merchant = eventObject?.merchant?.name || "Unknown merchant";
-          console.log(`[sudoWebhook] Auth DECLINED (channel blocked: ${channelLabel}) ? card:${sudoCardId} amount:${pendingAmount} ${currency}`);
+          console.log(
+            `[sudoWebhook] Auth DECLINED (channel blocked: ${channelLabel}) ? card:${sudoCardId} amount:${pendingAmount} ${currency}`,
+          );
           const channelName = channelLabel.toUpperCase();
-          const channelFriendly = channelLabel === 'pos' ? 'POS (in-store)' : channelLabel === 'atm' ? 'ATM' : 'Online (Web)';
+          const channelFriendly =
+            channelLabel === "pos"
+              ? "POS (in-store)"
+              : channelLabel === "atm"
+                ? "ATM"
+                : "Online (Web)";
           const notifTitle = `${channelFriendly} Transaction Declined`;
           const notifBody = `A ${displayAmount} payment at ${merchant} was declined. ${channelFriendly} transactions are turned off on your card.`;
           const emailHtml = `
@@ -12752,29 +14650,66 @@ exports.sudoWebhook = onRequest(
   </div>
   <p style="color:#888;font-size:12px;">If you did not attempt this transaction, your card details may be compromised ? freeze your card immediately from the app.</p>
 </div>`;
-          await notifyUser(found.userId, notifTitle, notifBody, "card_declined", emailHtml);
+          await notifyUser(
+            found.userId,
+            notifTitle,
+            notifBody,
+            "card_declined",
+            emailHtml,
+          );
           if (eventObject?._id) {
-            await db.collection("sudo_declined_auths").doc(eventObject._id).set({ declinedAt: admin.firestore.FieldValue.serverTimestamp(), declineReason: "channel_blocked", channelLabel });
-            await db.collection("users").doc(found.userId).collection("transactions").doc(eventObject._id).set({
-              type: "card_declined", source: "sudo_card", amount: pendingAmount, currency,
-              merchant, cardId: sudoCardId, declineReason: "channel_blocked", declineChannelLabel: channelLabel,
-              status: "declined", sudoEventId: eventObject._id,
-              timestamp: admin.firestore.FieldValue.serverTimestamp(),
-            });
+            await db
+              .collection("sudo_declined_auths")
+              .doc(eventObject._id)
+              .set({
+                declinedAt: admin.firestore.FieldValue.serverTimestamp(),
+                declineReason: "channel_blocked",
+                channelLabel,
+              });
+            await db
+              .collection("users")
+              .doc(found.userId)
+              .collection("transactions")
+              .doc(eventObject._id)
+              .set({
+                type: "card_declined",
+                source: "sudo_card",
+                amount: pendingAmount,
+                currency,
+                merchant,
+                cardId: sudoCardId,
+                declineReason: "channel_blocked",
+                declineChannelLabel: channelLabel,
+                status: "declined",
+                sudoEventId: eventObject._id,
+                timestamp: admin.firestore.FieldValue.serverTimestamp(),
+              });
           }
-          return res.status(200).json({ statusCode: 200, data: { responseCode: "57" } }); // Transaction not permitted to cardholder
+          return res
+            .status(200)
+            .json({ statusCode: 200, data: { responseCode: "57" } }); // Transaction not permitted to cardholder
         }
 
         // Check card merchant restrictions
         const incomingMerchantName = eventObject?.merchant?.name || "";
-        if (incomingMerchantName && incomingMerchantName !== "Unknown merchant") {
-          const merchantKey = incomingMerchantName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/, "");
+        if (
+          incomingMerchantName &&
+          incomingMerchantName !== "Unknown merchant"
+        ) {
+          const merchantKey = incomingMerchantName
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, "_")
+            .replace(/^_+|_+$/, "");
           const blockedMerchants = cardData.blockedMerchants || {};
           if (merchantKey && blockedMerchants[merchantKey] === false) {
-            const displayAmount = currency === "NGN"
-              ? `?${pendingAmount.toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-              : `$${pendingAmount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-            console.log(`[sudoWebhook] Auth DECLINED (merchant blocked: ${merchantKey}) ? card:${sudoCardId} amount:${pendingAmount} ${currency}`);
+            const displayAmount =
+              currency === "NGN"
+                ? `?${pendingAmount.toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                : `$${pendingAmount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+            console.log(
+              `[sudoWebhook] Auth DECLINED (merchant blocked: ${merchantKey}) ? card:${sudoCardId} amount:${pendingAmount} ${currency}`,
+            );
             const notifTitle = "Merchant Transaction Declined";
             const notifBody = `A ${displayAmount} payment at ${incomingMerchantName} was declined. This merchant is blocked on your card.`;
             const emailHtml = `
@@ -12792,17 +14727,44 @@ exports.sudoWebhook = onRequest(
   </div>
   <p style="color:#888;font-size:12px;">If you did not attempt this transaction, your card details may be compromised ? freeze your card immediately from the app.</p>
 </div>`;
-            await notifyUser(found.userId, notifTitle, notifBody, "card_declined", emailHtml);
+            await notifyUser(
+              found.userId,
+              notifTitle,
+              notifBody,
+              "card_declined",
+              emailHtml,
+            );
             if (eventObject?._id) {
-              await db.collection("sudo_declined_auths").doc(eventObject._id).set({ declinedAt: admin.firestore.FieldValue.serverTimestamp(), declineReason: "merchant_blocked", merchantKey });
-              await db.collection("users").doc(found.userId).collection("transactions").doc(eventObject._id).set({
-                type: "card_declined", source: "sudo_card", amount: pendingAmount, currency,
-                merchant: incomingMerchantName, cardId: sudoCardId, declineReason: "merchant_blocked", declineMerchantKey: merchantKey,
-                status: "declined", sudoEventId: eventObject._id,
-                timestamp: admin.firestore.FieldValue.serverTimestamp(),
-              });
+              await db
+                .collection("sudo_declined_auths")
+                .doc(eventObject._id)
+                .set({
+                  declinedAt: admin.firestore.FieldValue.serverTimestamp(),
+                  declineReason: "merchant_blocked",
+                  merchantKey,
+                });
+              await db
+                .collection("users")
+                .doc(found.userId)
+                .collection("transactions")
+                .doc(eventObject._id)
+                .set({
+                  type: "card_declined",
+                  source: "sudo_card",
+                  amount: pendingAmount,
+                  currency,
+                  merchant: incomingMerchantName,
+                  cardId: sudoCardId,
+                  declineReason: "merchant_blocked",
+                  declineMerchantKey: merchantKey,
+                  status: "declined",
+                  sudoEventId: eventObject._id,
+                  timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                });
             }
-            return res.status(200).json({ statusCode: 200, data: { responseCode: "57" } });
+            return res
+              .status(200)
+              .json({ statusCode: 200, data: { responseCode: "57" } });
           }
         }
 
@@ -12828,11 +14790,24 @@ exports.sudoWebhook = onRequest(
           const amountKobo = Math.round(pendingAmount * 100);
           if (!prefundLogKey) prefundLogKey = `${sudoCardId}_${Date.now()}`;
           try {
-            const userSnap = await db.collection("users").doc(found.userId).get();
-            const userVaData = userSnap.data()?.getAnchorData?.virtualAccount?.data;
-            const companySnap = await db.collection("company").doc("account_details").get();
-            if (!userVaData?.id || !companySnap.exists || !companySnap.data()?.accountId) {
-              throw new Error("Missing user or company account details for prefund");
+            const userSnap = await db
+              .collection("users")
+              .doc(found.userId)
+              .get();
+            const userVaData =
+              userSnap.data()?.getAnchorData?.virtualAccount?.data;
+            const companySnap = await db
+              .collection("company")
+              .doc("account_details")
+              .get();
+            if (
+              !userVaData?.id ||
+              !companySnap.exists ||
+              !companySnap.data()?.accountId
+            ) {
+              throw new Error(
+                "Missing user or company account details for prefund",
+              );
             }
             const prefundIdempotencyKey = `sudo_prefund_${prefundLogKey}`;
             const prefundResult = await makeApiRequest({
@@ -12856,39 +14831,62 @@ exports.sudoWebhook = onRequest(
             const prefundStatus = prefundResult?.data?.attributes?.status;
             prefundTransferId = prefundResult?.data?.id ?? null;
             if (prefundStatus === "FAILED") {
-              throw new Error(prefundResult?.data?.attributes?.failureReason || "Prefund transfer returned FAILED");
+              throw new Error(
+                prefundResult?.data?.attributes?.failureReason ||
+                  "Prefund transfer returned FAILED",
+              );
             }
             // Log prefund ? internal only, not shown in user UI
             await db.collection("sudo_card_prefunds").doc(prefundLogKey).set({
-              userId: found.userId, cardId: sudoCardId,
-              amountKobo, currency: "NGN",
+              userId: found.userId,
+              cardId: sudoCardId,
+              amountKobo,
+              currency: "NGN",
               transferId: prefundTransferId,
               idempotencyKey: prefundIdempotencyKey,
               status: "prefunded",
               createdAt: admin.firestore.FieldValue.serverTimestamp(),
             });
-            console.log(`[sudoWebhook] Prefund user?company OK ? transferId:${prefundTransferId} amountKobo:${amountKobo}`);
+            console.log(
+              `[sudoWebhook] Prefund user?company OK ? transferId:${prefundTransferId} amountKobo:${amountKobo}`,
+            );
           } catch (prefundErr) {
             approve = false;
             authDeclineReason = "prefund_failed";
-            console.error(`[sudoWebhook] Prefund transfer failed (auth:${prefundLogKey}):`, prefundErr.message);
-            await db.collection("sudo_card_prefunds").doc(prefundLogKey).set({
-              userId: found.userId, cardId: sudoCardId,
-              amountKobo, currency: "NGN",
-              status: "prefund_failed",
-              error: prefundErr.message,
-              createdAt: admin.firestore.FieldValue.serverTimestamp(),
-            }).catch(() => {});
+            console.error(
+              `[sudoWebhook] Prefund transfer failed (auth:${prefundLogKey}):`,
+              prefundErr.message,
+            );
+            await db
+              .collection("sudo_card_prefunds")
+              .doc(prefundLogKey)
+              .set({
+                userId: found.userId,
+                cardId: sudoCardId,
+                amountKobo,
+                currency: "NGN",
+                status: "prefund_failed",
+                error: prefundErr.message,
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+              })
+              .catch(() => {});
           }
         }
 
         if (!approve) {
           if (eventObject?._id) {
-            await db.collection("sudo_declined_auths").doc(eventObject._id).set({ declinedAt: admin.firestore.FieldValue.serverTimestamp(), declineReason: authDeclineReason });
+            await db
+              .collection("sudo_declined_auths")
+              .doc(eventObject._id)
+              .set({
+                declinedAt: admin.firestore.FieldValue.serverTimestamp(),
+                declineReason: authDeclineReason,
+              });
           }
-          const displayAmount = currency === "NGN"
-            ? `?${pendingAmount.toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-            : `$${pendingAmount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+          const displayAmount =
+            currency === "NGN"
+              ? `?${pendingAmount.toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+              : `$${pendingAmount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
           const merchant = eventObject?.merchant?.name || "Unknown merchant";
           const insufficientEmailHtml = `<div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:24px;"><h2 style="color:#c62828;">Transaction Declined</h2><p>A <strong>${displayAmount}</strong> payment at <strong>${merchant}</strong> was declined due to insufficient wallet balance.</p><p>Please top up your PadiPay wallet and try again.</p><p style="color:#888;font-size:12px;">If you did not attempt this transaction, please contact PadiPay support.</p></div>`;
           await notifyUser(
@@ -12896,12 +14894,14 @@ exports.sudoWebhook = onRequest(
             "Transaction Declined",
             `A ${displayAmount} payment at ${merchant} was declined ? insufficient balance.`,
             "card_declined",
-            insufficientEmailHtml
+            insufficientEmailHtml,
           );
         }
         const responseCode = approve ? "00" : "51";
         const respBody = { statusCode: 200, data: { responseCode } };
-        console.log(`[sudoWebhook] Auth ${approve ? "APPROVED" : "DECLINED"} ? card:${sudoCardId} amount:${pendingAmount} ${currency} | response: ${JSON.stringify(respBody)}`);
+        console.log(
+          `[sudoWebhook] Auth ${approve ? "APPROVED" : "DECLINED"} ? card:${sudoCardId} amount:${pendingAmount} ${currency} | response: ${JSON.stringify(respBody)}`,
+        );
 
         // If a prefund was completed but something goes wrong before we can confirm
         // the approval to Sudo, reverse the transfer (company ? user).
@@ -12909,12 +14909,26 @@ exports.sudoWebhook = onRequest(
           try {
             return res.status(200).json(respBody);
           } catch (sendErr) {
-            console.error(`[sudoWebhook] Response failed after prefund ? reversing transfer for auth:${prefundLogKey}`, sendErr.message);
+            console.error(
+              `[sudoWebhook] Response failed after prefund ? reversing transfer for auth:${prefundLogKey}`,
+              sendErr.message,
+            );
             try {
-              const userSnap = await db.collection("users").doc(found.userId).get();
-              const userVaData = userSnap.data()?.getAnchorData?.virtualAccount?.data;
-              const companySnap = await db.collection("company").doc("account_details").get();
-              if (userVaData?.id && companySnap.exists && companySnap.data()?.accountId) {
+              const userSnap = await db
+                .collection("users")
+                .doc(found.userId)
+                .get();
+              const userVaData =
+                userSnap.data()?.getAnchorData?.virtualAccount?.data;
+              const companySnap = await db
+                .collection("company")
+                .doc("account_details")
+                .get();
+              if (
+                userVaData?.id &&
+                companySnap.exists &&
+                companySnap.data()?.accountId
+              ) {
                 const reversalKey = `sudo_prefund_reversal_${prefundLogKey}`;
                 const reversalResult = await makeApiRequest({
                   url: `${BASE_URL}/transfers`,
@@ -12935,21 +14949,35 @@ exports.sudoWebhook = onRequest(
                   idempotencyKey: reversalKey,
                 });
                 const reversalTransferId = reversalResult?.data?.id ?? null;
-                console.log(`[sudoWebhook] Reversal company?user OK ? transferId:${reversalTransferId}`);
-                await db.collection("sudo_card_prefunds").doc(prefundLogKey).update({
-                  status: "reversed",
-                  reversalTransferId,
-                  reversalIdempotencyKey: reversalKey,
-                  reversalAt: admin.firestore.FieldValue.serverTimestamp(),
-                }).catch(() => {});
+                console.log(
+                  `[sudoWebhook] Reversal company?user OK ? transferId:${reversalTransferId}`,
+                );
+                await db
+                  .collection("sudo_card_prefunds")
+                  .doc(prefundLogKey)
+                  .update({
+                    status: "reversed",
+                    reversalTransferId,
+                    reversalIdempotencyKey: reversalKey,
+                    reversalAt: admin.firestore.FieldValue.serverTimestamp(),
+                  })
+                  .catch(() => {});
               }
             } catch (reversalErr) {
-              console.error(`[sudoWebhook] Reversal ALSO FAILED ? MANUAL INTERVENTION NEEDED auth:${prefundLogKey}`, reversalErr.message);
-              await db.collection("sudo_card_prefunds").doc(prefundLogKey).update({
-                status: "reversal_failed",
-                reversalError: reversalErr.message,
-                reversalAttemptedAt: admin.firestore.FieldValue.serverTimestamp(),
-              }).catch(() => {});
+              console.error(
+                `[sudoWebhook] Reversal ALSO FAILED ? MANUAL INTERVENTION NEEDED auth:${prefundLogKey}`,
+                reversalErr.message,
+              );
+              await db
+                .collection("sudo_card_prefunds")
+                .doc(prefundLogKey)
+                .update({
+                  status: "reversal_failed",
+                  reversalError: reversalErr.message,
+                  reversalAttemptedAt:
+                    admin.firestore.FieldValue.serverTimestamp(),
+                })
+                .catch(() => {});
             }
             throw sendErr;
           }
@@ -12969,7 +14997,9 @@ exports.sudoWebhook = onRequest(
           const b = await getAnchorBalanceKobo(found.userId);
           if (b !== null) balance = b;
         }
-        return res.status(200).json({ statusCode: 200, data: { responseCode: "00", balance } });
+        return res
+          .status(200)
+          .json({ statusCode: 200, data: { responseCode: "00", balance } });
       }
 
       // -- transaction.created -------------------------------------------
@@ -12979,15 +15009,23 @@ exports.sudoWebhook = onRequest(
         const currency = (eventObject?.currency || "NGN").toUpperCase();
         const merchant = eventObject?.merchant?.name || "Unknown merchant";
         const channel = eventObject?.transactionMetadata?.channel || "card";
-        const ref = eventObject?.transactionMetadata?.reference || eventObject?.terminal?.rrn || "";
-        const displayAmount = currency === "NGN"
-          ? `?${amount.toLocaleString("en-NG", {minimumFractionDigits: 2, maximumFractionDigits: 2})}`
-          : `$${amount.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+        const ref =
+          eventObject?.transactionMetadata?.reference ||
+          eventObject?.terminal?.rrn ||
+          "";
+        const displayAmount =
+          currency === "NGN"
+            ? `?${amount.toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+            : `$${amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
         // Check if the authorization was declined.
         // In transaction.created, eventObject.authorization is just the auth ID string (not an object),
         // so we look up the sudo_declined_auths collection that authorization.request populates.
-        const txStatus = (eventObject?.status || eventObject?.transactionStatus || "").toLowerCase();
+        const txStatus = (
+          eventObject?.status ||
+          eventObject?.transactionStatus ||
+          ""
+        ).toLowerCase();
         let declineReason = null;
         let declineChannelLabel = null;
         let wasDeclined =
@@ -12995,18 +15033,24 @@ exports.sudoWebhook = onRequest(
           txStatus === "declined" ||
           txStatus === "failed";
         if (!wasDeclined) {
-          const authId = typeof eventObject?.authorization === "string"
-            ? eventObject.authorization
-            : (eventObject?.authorization?._id || null);
+          const authId =
+            typeof eventObject?.authorization === "string"
+              ? eventObject.authorization
+              : eventObject?.authorization?._id || null;
           if (authId) {
-            const declinedDoc = await db.collection("sudo_declined_auths").doc(authId).get();
+            const declinedDoc = await db
+              .collection("sudo_declined_auths")
+              .doc(authId)
+              .get();
             if (declinedDoc.exists) {
               wasDeclined = true;
               const declinedData = declinedDoc.data() || {};
               declineReason = declinedData.declineReason || null;
               declineChannelLabel = declinedData.channelLabel || null;
               await db.collection("sudo_declined_auths").doc(authId).delete();
-              console.log(`[sudoWebhook] transaction.created: auth ${authId} found in declined cache ? treating as declined (reason: ${declineReason})`);
+              console.log(
+                `[sudoWebhook] transaction.created: auth ${authId} found in declined cache ? treating as declined (reason: ${declineReason})`,
+              );
             }
           }
         }
@@ -13017,7 +15061,9 @@ exports.sudoWebhook = onRequest(
           // reference, skip ? prevents duplicate entries when both events fire for the same tx.
           let skipWrite = false;
           if (!wasDeclined && ref) {
-            const dupSnap = await db.collection("users").doc(found.userId)
+            const dupSnap = await db
+              .collection("users")
+              .doc(found.userId)
               .collection("transactions")
               .where("reference", "==", ref)
               .where("type", "==", "card_declined")
@@ -13025,35 +15071,63 @@ exports.sudoWebhook = onRequest(
               .get();
             if (!dupSnap.empty) {
               skipWrite = true;
-              console.log(`[sudoWebhook] transaction.created skipped ? card_declined already exists for ref:${ref}`);
+              console.log(
+                `[sudoWebhook] transaction.created skipped ? card_declined already exists for ref:${ref}`,
+              );
             }
           }
 
           if (!skipWrite) {
             if (wasDeclined) {
-              console.log(`[sudoWebhook] transaction.created for DECLINED auth ? skipping spend notification. card:${sudoCardId} amount:${amount} ${currency}`);
+              console.log(
+                `[sudoWebhook] transaction.created for DECLINED auth ? skipping spend notification. card:${sudoCardId} amount:${amount} ${currency}`,
+              );
             } else {
               await notifyUser(
-                found.userId, "Card Transaction",
+                found.userId,
+                "Card Transaction",
                 `${displayAmount} spent at ${merchant} via ${channel}`,
                 "card_transaction",
-                `<div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:24px;"><h2 style="color:#2e7d32;">Card Transaction</h2><table style="width:100%;border-collapse:collapse;margin:16px 0;"><tr><td style="padding:8px 0;color:#666;">Merchant</td><td style="padding:8px 0;font-weight:600;">${merchant}</td></tr><tr><td style="padding:8px 0;color:#666;">Amount</td><td style="padding:8px 0;font-weight:600;">${displayAmount}</td></tr><tr><td style="padding:8px 0;color:#666;">Channel</td><td style="padding:8px 0;font-weight:600;">${channel.toUpperCase()}</td></tr></table><p style="color:#888;font-size:12px;">If you did not authorise this transaction, freeze your card immediately from the PadiPay app.</p></div>`
+                `<div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:24px;"><h2 style="color:#2e7d32;">Card Transaction</h2><table style="width:100%;border-collapse:collapse;margin:16px 0;"><tr><td style="padding:8px 0;color:#666;">Merchant</td><td style="padding:8px 0;font-weight:600;">${merchant}</td></tr><tr><td style="padding:8px 0;color:#666;">Amount</td><td style="padding:8px 0;font-weight:600;">${displayAmount}</td></tr><tr><td style="padding:8px 0;color:#666;">Channel</td><td style="padding:8px 0;font-weight:600;">${channel.toUpperCase()}</td></tr></table><p style="color:#888;font-size:12px;">If you did not authorise this transaction, freeze your card immediately from the PadiPay app.</p></div>`,
               );
             }
-            await db.collection("users").doc(found.userId).collection("transactions").add({
-              type: wasDeclined ? "card_declined" : "card_debit", source: "sudo_card",
-              amount, currency, merchant, channel, reference: ref,
-              cardId: sudoCardId, sudoEventId: payload?._id || null,
-              status: wasDeclined ? "declined" : "approved",
-              ...(wasDeclined && declineReason ? { declineReason, ...(declineChannelLabel ? { declineChannelLabel } : {}) } : {}),
-              timestamp: admin.firestore.FieldValue.serverTimestamp(),
-            });
+            await db
+              .collection("users")
+              .doc(found.userId)
+              .collection("transactions")
+              .add({
+                type: wasDeclined ? "card_declined" : "card_debit",
+                source: "sudo_card",
+                amount,
+                currency,
+                merchant,
+                channel,
+                reference: ref,
+                cardId: sudoCardId,
+                sudoEventId: payload?._id || null,
+                status: wasDeclined ? "declined" : "approved",
+                ...(wasDeclined && declineReason
+                  ? {
+                      declineReason,
+                      ...(declineChannelLabel ? { declineChannelLabel } : {}),
+                    }
+                  : {}),
+                timestamp: admin.firestore.FieldValue.serverTimestamp(),
+              });
 
             // -- Subscription tracking (approved debits only) -------------
             if (!wasDeclined && merchant && merchant !== "Unknown merchant") {
-              const merchantKey = merchant.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/, "");
+              const merchantKey = merchant
+                .trim()
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, "_")
+                .replace(/^_+|_+$/, "");
               if (merchantKey) {
-                const subRef = db.collection("users").doc(found.userId).collection("card_subscriptions").doc(merchantKey);
+                const subRef = db
+                  .collection("users")
+                  .doc(found.userId)
+                  .collection("card_subscriptions")
+                  .doc(merchantKey);
                 try {
                   const subSnap = await subRef.get();
                   const now = admin.firestore.Timestamp.now();
@@ -13066,11 +15140,16 @@ exports.sudoWebhook = onRequest(
                     if (history.length >= 2) {
                       const gaps = [];
                       for (let i = 1; i < history.length; i++) {
-                        const a = history[i - 1].toMillis ? history[i - 1].toMillis() : history[i - 1];
-                        const b = history[i].toMillis ? history[i].toMillis() : history[i];
+                        const a = history[i - 1].toMillis
+                          ? history[i - 1].toMillis()
+                          : history[i - 1];
+                        const b = history[i].toMillis
+                          ? history[i].toMillis()
+                          : history[i];
                         gaps.push(b - a);
                       }
-                      const avgGap = gaps.reduce((s, g) => s + g, 0) / gaps.length;
+                      const avgGap =
+                        gaps.reduce((s, g) => s + g, 0) / gaps.length;
                       estimatedNextMs = now.toMillis() + avgGap;
                     }
                     await subRef.update({
@@ -13080,7 +15159,14 @@ exports.sudoWebhook = onRequest(
                       currency,
                       cardId: sudoCardId,
                       chargeHistory: history,
-                      ...(estimatedNextMs ? { estimatedNextChargeAt: admin.firestore.Timestamp.fromMillis(estimatedNextMs) } : {}),
+                      ...(estimatedNextMs
+                        ? {
+                            estimatedNextChargeAt:
+                              admin.firestore.Timestamp.fromMillis(
+                                estimatedNextMs,
+                              ),
+                          }
+                        : {}),
                     });
                   } else {
                     await subRef.set({
@@ -13098,13 +15184,18 @@ exports.sudoWebhook = onRequest(
                     });
                   }
                 } catch (subErr) {
-                  console.warn("[sudoWebhook] subscription tracking error:", subErr.message);
+                  console.warn(
+                    "[sudoWebhook] subscription tracking error:",
+                    subErr.message,
+                  );
                 }
               }
             }
           }
         }
-        console.log(`[sudoWebhook] transaction.created processed ? card:${sudoCardId} amount:${amount} ${currency} declined:${wasDeclined}`);
+        console.log(
+          `[sudoWebhook] transaction.created processed ? card:${sudoCardId} amount:${amount} ${currency} declined:${wasDeclined}`,
+        );
         return res.status(200).json({ ok: true });
       }
 
@@ -13114,12 +15205,17 @@ exports.sudoWebhook = onRequest(
         const amount = Math.abs(eventObject?.amount ?? 0);
         const currency = (eventObject?.currency || "NGN").toUpperCase();
         const merchant = eventObject?.merchant?.name || "Unknown merchant";
-        const reason = eventObject?.requestHistory?.[0]?.narration || "Transaction declined";
-        const authDeclinedRef = eventObject?.transactionMetadata?.reference || eventObject?.terminal?.rrn || "";
+        const reason =
+          eventObject?.requestHistory?.[0]?.narration || "Transaction declined";
+        const authDeclinedRef =
+          eventObject?.transactionMetadata?.reference ||
+          eventObject?.terminal?.rrn ||
+          "";
         const authId = eventObject?._id || null;
-        const displayAmount = currency === "NGN"
-          ? `?${amount.toLocaleString("en-NG", {minimumFractionDigits: 2, maximumFractionDigits: 2})}`
-          : `$${amount.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+        const displayAmount =
+          currency === "NGN"
+            ? `?${amount.toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+            : `$${amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
         const found = await findUserByCardId(sudoCardId);
         if (found) {
@@ -13127,11 +15223,16 @@ exports.sudoWebhook = onRequest(
           // the auth ID is in sudo_declined_auths. Skip to avoid duplicate notification + transaction.
           let alreadyHandled = false;
           if (authId) {
-            const declinedDoc = await db.collection("sudo_declined_auths").doc(authId).get();
+            const declinedDoc = await db
+              .collection("sudo_declined_auths")
+              .doc(authId)
+              .get();
             if (declinedDoc.exists) {
               alreadyHandled = true;
               await db.collection("sudo_declined_auths").doc(authId).delete();
-              console.log(`[sudoWebhook] authorization.declined: auth ${authId} already handled by authorization.request ? skipping duplicate`);
+              console.log(
+                `[sudoWebhook] authorization.declined: auth ${authId} already handled by authorization.request ? skipping duplicate`,
+              );
             }
           }
 
@@ -13141,16 +15242,25 @@ exports.sudoWebhook = onRequest(
               "Transaction Declined",
               `${displayAmount} at ${merchant} was declined: ${reason}`,
               "card_declined",
-              `<div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:24px;"><h2 style="color:#c62828;">Transaction Declined</h2><table style="width:100%;border-collapse:collapse;margin:16px 0;"><tr><td style="padding:8px 0;color:#666;">Merchant</td><td style="padding:8px 0;font-weight:600;">${merchant}</td></tr><tr><td style="padding:8px 0;color:#666;">Amount</td><td style="padding:8px 0;font-weight:600;">${displayAmount}</td></tr><tr><td style="padding:8px 0;color:#666;">Reason</td><td style="padding:8px 0;font-weight:600;color:#c62828;">${reason}</td></tr></table><p style="color:#888;font-size:12px;">If you did not attempt this transaction, your card details may be compromised ? freeze your card immediately from the app.</p></div>`
+              `<div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:24px;"><h2 style="color:#c62828;">Transaction Declined</h2><table style="width:100%;border-collapse:collapse;margin:16px 0;"><tr><td style="padding:8px 0;color:#666;">Merchant</td><td style="padding:8px 0;font-weight:600;">${merchant}</td></tr><tr><td style="padding:8px 0;color:#666;">Amount</td><td style="padding:8px 0;font-weight:600;">${displayAmount}</td></tr><tr><td style="padding:8px 0;color:#666;">Reason</td><td style="padding:8px 0;font-weight:600;color:#c62828;">${reason}</td></tr></table><p style="color:#888;font-size:12px;">If you did not attempt this transaction, your card details may be compromised ? freeze your card immediately from the app.</p></div>`,
             );
-            await db.collection("users").doc(found.userId).collection("transactions").add({
-              type: "card_declined", source: "sudo_card",
-              amount, currency, merchant, reason, cardId: sudoCardId,
-              reference: authDeclinedRef || null,
-              sudoEventId: payload?._id || null,
-              status: "declined",
-              timestamp: admin.firestore.FieldValue.serverTimestamp(),
-            });
+            await db
+              .collection("users")
+              .doc(found.userId)
+              .collection("transactions")
+              .add({
+                type: "card_declined",
+                source: "sudo_card",
+                amount,
+                currency,
+                merchant,
+                reason,
+                cardId: sudoCardId,
+                reference: authDeclinedRef || null,
+                sudoEventId: payload?._id || null,
+                status: "declined",
+                timestamp: admin.firestore.FieldValue.serverTimestamp(),
+              });
           }
         }
         return res.status(200).json({ ok: true });
@@ -13162,10 +15272,14 @@ exports.sudoWebhook = onRequest(
         const amount = Math.abs(eventObject?.amount ?? 0);
         const currency = (eventObject?.currency || "NGN").toUpperCase();
         const merchant = eventObject?.merchant?.name || "Unknown merchant";
-        const ref = eventObject?.transactionMetadata?.reference || eventObject?.terminal?.rrn || "";
-        const displayAmount = currency === "NGN"
-          ? `?${amount.toLocaleString("en-NG", {minimumFractionDigits: 2, maximumFractionDigits: 2})}`
-          : `$${amount.toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+        const ref =
+          eventObject?.transactionMetadata?.reference ||
+          eventObject?.terminal?.rrn ||
+          "";
+        const displayAmount =
+          currency === "NGN"
+            ? `?${amount.toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+            : `$${amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
         const found = await findUserByCardId(sudoCardId);
         if (found) {
@@ -13174,14 +15288,23 @@ exports.sudoWebhook = onRequest(
             "Card Refund",
             `${displayAmount} refund from ${merchant} has been processed`,
             "card_refund",
-            `<div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:24px;"><h2 style="color:#2e7d32;">Card Refund Processed</h2><p>A refund of <strong>${displayAmount}</strong> from <strong>${merchant}</strong> has been credited to your account.</p></div>`
+            `<div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:24px;"><h2 style="color:#2e7d32;">Card Refund Processed</h2><p>A refund of <strong>${displayAmount}</strong> from <strong>${merchant}</strong> has been credited to your account.</p></div>`,
           );
-          await db.collection("users").doc(found.userId).collection("transactions").add({
-            type: "card_refund", source: "sudo_card",
-            amount, currency, merchant, reference: ref, cardId: sudoCardId,
-            sudoEventId: payload?._id || null,
-            timestamp: admin.firestore.FieldValue.serverTimestamp(),
-          });
+          await db
+            .collection("users")
+            .doc(found.userId)
+            .collection("transactions")
+            .add({
+              type: "card_refund",
+              source: "sudo_card",
+              amount,
+              currency,
+              merchant,
+              reference: ref,
+              cardId: sudoCardId,
+              sudoEventId: payload?._id || null,
+              timestamp: admin.firestore.FieldValue.serverTimestamp(),
+            });
         }
         return res.status(200).json({ ok: true });
       }
@@ -13196,16 +15319,18 @@ exports.sudoWebhook = onRequest(
 
         const found = await findUserByCardId(sudoCardId);
         if (found) {
-          await found.cardDoc.ref.update({
-            status: "terminated",
-            terminatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          }).catch(() => {});
+          await found.cardDoc.ref
+            .update({
+              status: "terminated",
+              terminatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            })
+            .catch(() => {});
           await notifyUser(
             found.userId,
             "Card Terminated",
             `Your ${currency} card ending in ${last4} has been terminated`,
             "card_terminated",
-            `<div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:24px;"><h2 style="color:#c62828;">Card Terminated</h2><p>Your ${currency} virtual card ending in <strong>${last4}</strong> has been permanently terminated and can no longer be used.</p><p>If you did not request this, please contact PadiPay support immediately.</p></div>`
+            `<div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:24px;"><h2 style="color:#c62828;">Card Terminated</h2><p>Your ${currency} virtual card ending in <strong>${last4}</strong> has been permanently terminated and can no longer be used.</p><p>If you did not request this, please contact PadiPay support immediately.</p></div>`,
           );
         }
         return res.status(200).json({ ok: true });
@@ -13217,7 +15342,9 @@ exports.sudoWebhook = onRequest(
       console.error("[sudoWebhook] Error:", err);
       // For gateway events that need a sync response, still send a valid structure.
       if (["authorization.request", "card.balance"].includes(eventType)) {
-        return res.status(200).json({ statusCode: 200, data: { responseCode: "00" } });
+        return res
+          .status(200)
+          .json({ statusCode: 200, data: { responseCode: "00" } });
       }
       res.status(500).json({ ok: false, error: err.message });
     }
@@ -13238,7 +15365,8 @@ exports.dailySubscriptionReminders = onSchedule(
     //   reminderEnabled == true AND estimatedNextChargeAt is set
     let subSnaps;
     try {
-      subSnaps = await db.collectionGroup("card_subscriptions")
+      subSnaps = await db
+        .collectionGroup("card_subscriptions")
         .where("reminderEnabled", "==", true)
         .where("estimatedNextChargeAt", "!=", null)
         .get();
@@ -13273,9 +15401,18 @@ exports.dailySubscriptionReminders = onSchedule(
         const locale = currency === "NGN" ? "en-NG" : "en-US";
         const displayAmount = `${symbol}${(sub.lastAmount || 0).toLocaleString(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
         const merchantName = sub.merchantName || sub.merchantKey;
-        const nextDate = new Date(nextTs).toLocaleDateString("en-NG", { day: "numeric", month: "short", year: "numeric" });
+        const nextDate = new Date(nextTs).toLocaleDateString("en-NG", {
+          day: "numeric",
+          month: "short",
+          year: "numeric",
+        });
 
-        const daysLabel = daysUntil < 1 ? "today" : daysUntil < 2 ? "tomorrow" : `in ${Math.ceil(daysUntil)} days`;
+        const daysLabel =
+          daysUntil < 1
+            ? "today"
+            : daysUntil < 2
+              ? "tomorrow"
+              : `in ${Math.ceil(daysUntil)} days`;
 
         const notifTitle = `${merchantName} charge due ${daysLabel}`;
         const notifBody = `Your last ${displayAmount} charge to ${merchantName} was on ${new Date(sub.lastChargedAt.toMillis()).toLocaleDateString("en-NG", { day: "numeric", month: "short" })}. Next expected: ${nextDate}. Open PadiPay to block it if needed.`;
@@ -13296,40 +15433,56 @@ exports.dailySubscriptionReminders = onSchedule(
   <p style="color:#888;font-size:12px;">To turn off these reminders, open PadiPay &rarr; Cards &rarr; Subscriptions &rarr; tap ${merchantName} &rarr; disable reminder.</p>
 </div>`;
 
-        await saveNotification(userId, { title: notifTitle, body: notifBody, type: "subscription_reminder" });
+        await saveNotification(userId, {
+          title: notifTitle,
+          body: notifBody,
+          type: "subscription_reminder",
+        });
         try {
           const userSnap = await db.collection("users").doc(userId).get();
           const userData = userSnap.data() || {};
           if (userData.deviceToken) {
-            await admin.messaging().send({ token: userData.deviceToken, notification: { title: notifTitle, body: notifBody }, ...FCM_CHANNEL });
+            await admin
+              .messaging()
+              .send({
+                token: userData.deviceToken,
+                notification: { title: notifTitle, body: notifBody },
+                ...FCM_CHANNEL,
+              });
           }
           if (userData.email) {
-            await sendNotifyEmail({ to: userData.email, subject: notifTitle, html: emailHtml, text: notifBody });
+            await sendNotifyEmail({
+              to: userData.email,
+              subject: notifTitle,
+              html: emailHtml,
+              text: notifBody,
+            });
           }
         } catch (pushErr) {
-          console.warn("[dailySubscriptionReminders] push/email error:", pushErr.message);
+          console.warn(
+            "[dailySubscriptionReminders] push/email error:",
+            pushErr.message,
+          );
         }
 
-        await doc.ref.update({ lastReminderSentAt: admin.firestore.Timestamp.now() });
+        await doc.ref.update({
+          lastReminderSentAt: admin.firestore.Timestamp.now(),
+        });
         sent++;
-        console.log(`[dailySubscriptionReminders] Reminder sent ? user:${userId} merchant:${merchantName}`);
+        console.log(
+          `[dailySubscriptionReminders] Reminder sent ? user:${userId} merchant:${merchantName}`,
+        );
       } catch (docErr) {
-        console.warn("[dailySubscriptionReminders] error processing sub:", doc.ref.path, docErr.message);
+        console.warn(
+          "[dailySubscriptionReminders] error processing sub:",
+          doc.ref.path,
+          docErr.message,
+        );
       }
     }
     console.log(`[dailySubscriptionReminders] Done ? ${sent} reminder(s) sent`);
   },
 );
-
-
-
-
-
-
-
-
-
-
 
 // ============================================================
 // SUPER AGENT ? Banking Functions
@@ -13348,7 +15501,10 @@ async function ensureSuperAgent(auth) {
   }
   const agent = snap.data();
   if (agent.status !== "active") {
-    throw new HttpsError("permission-denied", "Super Agent account is suspended");
+    throw new HttpsError(
+      "permission-denied",
+      "Super Agent account is suspended",
+    );
   }
 }
 
@@ -13361,7 +15517,11 @@ exports.createSuperAgentCounterparty = onCall(
   async (data) => {
     await ensureSuperAgent(data.auth);
     const secretKey = getanchorSecretKey.value();
-    if (!secretKey) throw new HttpsError("invalid-argument", "Getanchor Secret Key is not set");
+    if (!secretKey)
+      throw new HttpsError(
+        "invalid-argument",
+        "Getanchor Secret Key is not set",
+      );
 
     validateData(data.data, [
       { key: "accountName", message: "Account name is required" },
@@ -13404,13 +15564,21 @@ exports.createSuperAgentNipTransfer = onCall(
   async (data) => {
     await ensureSuperAgent(data.auth);
     const secretKey = getanchorSecretKey.value();
-    if (!secretKey) throw new HttpsError("invalid-argument", "Getanchor Secret Key is not set");
+    if (!secretKey)
+      throw new HttpsError(
+        "invalid-argument",
+        "Getanchor Secret Key is not set",
+      );
 
     validateData(data.data, [
       { key: "accountId", message: "Account ID is required" },
       { key: "accountType", message: "Account Type is required" },
       { key: "counterpartyId", message: "Counterparty ID is required" },
-      { key: "amount", message: "Valid amount is required", validator: (v) => typeof v === "number" && v > 0 },
+      {
+        key: "amount",
+        message: "Valid amount is required",
+        validator: (v) => typeof v === "number" && v > 0,
+      },
       { key: "currency", message: "Currency is required" },
       { key: "idempotencyKey", message: "Idempotency key is required" },
     ]);
@@ -13436,7 +15604,13 @@ exports.createSuperAgentNipTransfer = onCall(
         type: "NIPTransfer",
       },
     };
-    return makeApiRequest({ url, method: "POST", secretKey, body, idempotencyKey });
+    return makeApiRequest({
+      url,
+      method: "POST",
+      secretKey,
+      body,
+      idempotencyKey,
+    });
   },
 );
 
@@ -13449,16 +15623,20 @@ exports.superAgentVerifyAccountNumber = onCall(
   async (data) => {
     await ensureSuperAgent(data.auth);
     const secretKey = getanchorSecretKey.value();
-    if (!secretKey) throw new HttpsError("invalid-argument", "Getanchor Secret Key is not set");
+    if (!secretKey)
+      throw new HttpsError(
+        "invalid-argument",
+        "Getanchor Secret Key is not set",
+      );
 
     validateData(data.data, [
       { key: "accountNumber", message: "Account number is required" },
       { key: "bankId", message: "Bank ID is required" },
     ]);
 
-  const accountNumber = data.data.accountNumber.trim();
-  const bankIdOrBankCode = data.data.bankId.trim();
-  const url = `${BASE_URL}/payments/verify-account/${encodeURIComponent(bankIdOrBankCode)}/${encodeURIComponent(accountNumber)}`;
+    const accountNumber = data.data.accountNumber.trim();
+    const bankIdOrBankCode = data.data.bankId.trim();
+    const url = `${BASE_URL}/payments/verify-account/${encodeURIComponent(bankIdOrBankCode)}/${encodeURIComponent(accountNumber)}`;
     return makeApiRequest({ url, method: "GET", secretKey });
   },
 );
@@ -13471,7 +15649,11 @@ exports.superAgentFetchBalance = onCall(
   async (data) => {
     await ensureSuperAgent(data.auth);
     const secretKey = getanchorSecretKey.value();
-    if (!secretKey) throw new HttpsError("invalid-argument", "Getanchor Secret Key is not set");
+    if (!secretKey)
+      throw new HttpsError(
+        "invalid-argument",
+        "Getanchor Secret Key is not set",
+      );
 
     validateData(data.data, [
       { key: "accountId", message: "Account ID is required" },
@@ -13482,4 +15664,3 @@ exports.superAgentFetchBalance = onCall(
     return makeApiRequest({ url, method: "GET", secretKey });
   },
 );
-
