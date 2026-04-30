@@ -2269,7 +2269,10 @@ const _getSafehavenAccountForUser = async (uid) => {
     const setupSnap = await db.collection("safehavenUserSetup").doc(uid).get();
     setupData = setupSnap.exists ? setupSnap.data() || {} : null;
   } catch (e) {
-    console.warn("[_getSafehavenAccountForUser] setup lookup failed:", e.message);
+    console.warn(
+      "[_getSafehavenAccountForUser] setup lookup failed:",
+      e.message,
+    );
   }
   if (!snap.exists && !setupData) return null;
   const userData = snap.data() || {};
@@ -2368,80 +2371,122 @@ const _safehavenListMainAccounts = async () => {
 
 const _safehavenNormalizeBankCode = (value) => {
   const raw = String(value || "").trim();
-  if (!raw || raw === "090286" || _looksLikeLegacyAnchorId(raw)) return "999240";
+  if (!raw || raw === "090286" || _looksLikeLegacyAnchorId(raw))
+    return "999240";
   return raw;
 };
 
 const _getSafehavenCompanyMainAccount = async () => {
-  const companySnap = await db.collection("company").doc("account_details").get();
-  const companyData = companySnap.exists ? companySnap.data() || {} : {};
-  const firestoreAccount = {
-    accountId: String(companyData.accountId || companyData.id || "").trim(),
-    accountNumber: String(companyData.accountNumber || "").trim(),
-    accountName: String(companyData.accountName || "").trim(),
-    bankCode: _safehavenNormalizeBankCode(
-      companyData.bankId || companyData.bankCode || "999240",
-    ),
-  };
+  try {
+    const resp = await safehavenRequest({
+      path: "/accounts?page=0&limit=100&isSubAccount=false",
+      method: "GET",
+    });
+    const accounts = Array.isArray(resp.data) ? resp.data : [];
+    const defaultAccount =
+      accounts.find((acc) => acc.isDefault === true) || accounts[0];
 
-  if (firestoreAccount.accountNumber) return firestoreAccount;
-
-  const accounts = await _safehavenListMainAccounts();
-  const active = accounts.filter(
-    (a) => !a.isSubAccount && a.status.toLowerCase() !== "inactive",
-  );
-  const matched = active.find((a) => a.isDefault) || active[0] || null;
-  if (!matched?.accountNumber) return null;
-
-  return {
-    accountId: matched.id,
-    accountNumber: matched.accountNumber,
-    accountName: matched.accountName,
-    bankCode: "999240",
-  };
+    if (defaultAccount) {
+      return {
+        accountId: defaultAccount._id,
+        accountNumber: defaultAccount.accountNumber,
+        bankCode: "090286",
+        bankName: "Safe Haven MFB",
+      };
+    }
+  } catch (err) {
+    console.error("[_getSafehavenCompanyMainAccount] Error:", err.message);
+  }
+  return null;
 };
 
+// Helper function to perform a book transfer by account number (NIP style but within SafeHaven)
 const _safehavenBookTransferByAccountNumber = async ({
   uid,
   debitAccountNumber,
   beneficiaryAccountNumber,
-  beneficiaryBankCode = "999240",
+  beneficiaryBankCode,
   amountKobo,
   narration,
   paymentReference,
 }) => {
-  const amount = Number(amountKobo || 0);
-  if (!debitAccountNumber || !beneficiaryAccountNumber || amount <= 0) {
-    throw new HttpsError(
-      "failed-precondition",
-      "SafeHaven transfer account details are incomplete",
+  // Ensure we have real account numbers, not SafeHaven MongoDB IDs
+  let resolvedBeneficiaryAccountNumber = beneficiaryAccountNumber;
+  let resolvedBeneficiaryBankCode = beneficiaryBankCode || "999240";
+
+  // Check if beneficiaryAccountNumber looks like a SafeHaven MongoDB ID (24 hex chars) or contains "anc_acc"
+  const looksLikeSafehavenId =
+    /^[a-f0-9]{24}$/.test(resolvedBeneficiaryAccountNumber) ||
+    resolvedBeneficiaryAccountNumber.includes("anc_acc");
+
+  if (looksLikeSafehavenId) {
+    // This is a SafeHaven account ID, not an account number
+    // We need to resolve it to an actual account number
+    console.log(
+      "[_safehavenBookTransferByAccountNumber] Resolving SafeHaven ID to account number:",
+      resolvedBeneficiaryAccountNumber,
     );
+
+    try {
+      // Fetch the account details from SafeHaven
+      const accountResp = await safehavenRequest({
+        path: `/accounts/${encodeURIComponent(resolvedBeneficiaryAccountNumber)}`,
+        method: "GET",
+      });
+      const accountData = accountResp.data || {};
+      resolvedBeneficiaryAccountNumber = accountData.accountNumber;
+
+      if (!resolvedBeneficiaryAccountNumber) {
+        throw new Error("Could not resolve account number from SafeHaven ID");
+      }
+      console.log(
+        "[_safehavenBookTransferByAccountNumber] Resolved account number:",
+        resolvedBeneficiaryAccountNumber,
+      );
+    } catch (err) {
+      console.error(
+        "[_safehavenBookTransferByAccountNumber] Failed to resolve account:",
+        err.message,
+      );
+      throw new HttpsError(
+        "failed-precondition",
+        "Could not resolve beneficiary account number",
+      );
+    }
   }
 
-  const normalizedBankCode = _safehavenNormalizeBankCode(beneficiaryBankCode);
+  // Now perform name enquiry with the actual account number
   const enquiry = await _safehavenNameEnquiry(
     uid,
-    normalizedBankCode,
-    beneficiaryAccountNumber,
+    resolvedBeneficiaryBankCode,
+    resolvedBeneficiaryAccountNumber,
   );
   const nameEnquiryReference = enquiry.nameEnquiryReference;
   if (!nameEnquiryReference) {
     throw new HttpsError(
       "failed-precondition",
-      "Name enquiry failed for SafeHaven transfer",
+      "Name enquiry failed for destination account",
     );
   }
 
   const requestBody = {
     nameEnquiryReference,
-    debitAccountNumber,
-    beneficiaryBankCode: normalizedBankCode,
-    beneficiaryAccountNumber,
-    narration,
-    amount: amount / 100,
+    debitAccountNumber: String(debitAccountNumber || "").trim(),
+    beneficiaryBankCode: resolvedBeneficiaryBankCode,
+    beneficiaryAccountNumber: resolvedBeneficiaryAccountNumber,
+    narration: narration || "Transfer",
+    amount: amountKobo / 100,
     saveBeneficiary: false,
-    paymentReference,
+    paymentReference: paymentReference || `ref_${Date.now()}`,
   };
+
+  console.log("[_safehavenBookTransferByAccountNumber] request", {
+    path: "/transfers",
+    method: "POST",
+    beneficiaryAccountNumber: resolvedBeneficiaryAccountNumber,
+    originalInput: beneficiaryAccountNumber,
+    amountKobo,
+  });
 
   const resp = await safehavenRequest({
     path: "/transfers",
@@ -2449,12 +2494,12 @@ const _safehavenBookTransferByAccountNumber = async ({
     body: requestBody,
   });
   const tx = resp.data || {};
-  const status = String(tx.status || "PENDING").toUpperCase();
+
   return {
     id: tx._id || tx.id || paymentReference,
-    status,
     reference: tx.paymentReference || paymentReference,
-    raw: tx,
+    status: tx.status || "PENDING",
+    failureReason: tx.failureReason || null,
   };
 };
 
@@ -12298,7 +12343,6 @@ exports.sudoFundAndCreateCard = onCall(
       );
     }
 
-    // Anonymous cards resolve customer from company Firestore doc; no caller-provided IDs needed
     const isAnonymousCard = (type || "").toLowerCase() === "anonymous";
     if (!isAnonymousCard && !customerId) {
       throw new HttpsError(
@@ -12346,12 +12390,10 @@ exports.sudoFundAndCreateCard = onCall(
       });
     }
 
-    // Extracts a human-readable string from a Sudo API message field (may be string or array)
     const parseSudoMessage = (message) => {
       if (!message) return null;
       if (typeof message === "string") return message;
       if (Array.isArray(message)) {
-        // Each item may have { constraints: { key: "text" } }
         const texts = message.flatMap((m) => {
           if (m && m.constraints) return Object.values(m.constraints);
           if (typeof m === "string") return [m];
@@ -12367,13 +12409,11 @@ exports.sudoFundAndCreateCard = onCall(
         const userDoc = await db.collection("users").doc(userId).get();
         const deviceToken = userDoc.data()?.deviceToken;
         if (deviceToken) {
-          await admin
-            .messaging()
-            .send({
-              token: deviceToken,
-              notification: { title, body },
-              ...FCM_CHANNEL,
-            });
+          await admin.messaging().send({
+            token: deviceToken,
+            notification: { title, body },
+            ...FCM_CHANNEL,
+          });
         }
       } catch (notifErr) {
         console.error("Push notification send error:", notifErr);
@@ -12405,25 +12445,48 @@ exports.sudoFundAndCreateCard = onCall(
     let resolvedCardFeeNgnEquivalent = null;
 
     try {
+      // Fetch company SafeHaven account directly from API (NOT from Firestore)
+      const companySafehavenAccount = await _getSafehavenCompanyMainAccount();
+      if (!companySafehavenAccount || !companySafehavenAccount.accountNumber) {
+        throw new Error(
+          "Company SafeHaven account could not be fetched from API",
+        );
+      }
+      console.log(
+        "[sudoFundAndCreateCard] Company SafeHaven account from API:",
+        {
+          accountNumber: companySafehavenAccount.accountNumber,
+          accountId: companySafehavenAccount.accountId,
+        },
+      );
+
       // Resolve effective Sudo customer ID
-      // For anonymous cards, use company Firestore doc; for standard cards, use caller-provided value
       let effectiveCustomerId = customerId || "";
-      let anonymousCompanyName = null; // set when isAnonymousCard to persist nameOnCard in Firestore
+      let anonymousCompanyName = null;
       let resolvedUsdNgnRate = null;
       let resolvedFundAmountNgnEquivalent = null;
-      if (isAnonymousCard) {
-        const companyRef = db.collection("company").doc("sudoAccountDetails");
-        const companySnap = await companyRef.get();
 
-        // Auto-create the Firestore doc with defaults if it doesn't exist yet
-        if (!companySnap.exists) {
+      if (isAnonymousCard) {
+        // For anonymous cards, we need a Sudo customer ID for the company
+        // This should be stored in Firestore as it's a Sudo reference, not SafeHaven
+        const companySudoRef = db
+          .collection("company")
+          .doc("sudoAccountDetails");
+        const companySudoSnap = await companySudoRef.get();
+        let companyCustomerId = companySudoSnap.exists
+          ? companySudoSnap.data()?.sudoCustomerId
+          : null;
+
+        if (!companyCustomerId) {
           console.log(
-            "[sudoFundAndCreateCard] company/sudoAccountDetails missing ? creating with defaults...",
+            "[sudoFundAndCreateCard] Creating company Sudo customer...",
           );
-          await companyRef.set({
+          const custBody = {
+            type: "company",
             name: "PadiPay Technologies Ltd",
             phoneNumber: "2348000000000",
             emailAddress: "cards@padipay.co",
+            status: "active",
             billingAddress: {
               line1: "1 Example Street",
               city: "Lagos Island",
@@ -12433,67 +12496,6 @@ exports.sudoFundAndCreateCard = onCall(
             },
             company: {
               name: "PadiPay Technologies Ltd",
-              identity: { type: "CAC", number: "RC-0000000" },
-              officer: {
-                firstName: "Company",
-                lastName: "Officer",
-                phone: "2348000000000",
-                email: "officer@padipay.co",
-                identity: { type: "BVN", number: "00000000000" },
-                dob: "1990/01/01",
-              },
-            },
-            sudoCustomerId: "",
-          });
-          console.log(
-            "[sudoFundAndCreateCard] company/sudoAccountDetails created with defaults ? update real values in Firebase Console.",
-          );
-        }
-
-        // Re-read after potential creation
-        const companyData =
-          (companySnap.exists ? companySnap : await companyRef.get()).data() ||
-          {};
-        let companyCustomerId = companyData.sudoCustomerId || "";
-
-        // Auto-create company Sudo customer if not yet provisioned
-        if (!companyCustomerId) {
-          console.log(
-            "[sudoFundAndCreateCard] Provisioning company Sudo customer for anonymous cards...",
-          );
-          const custBody = {
-            type: "company",
-            name: companyData.name || "PadiPay Technologies Ltd",
-            phoneNumber: companyData.phoneNumber || "",
-            emailAddress: companyData.emailAddress || "",
-            status: "active",
-            ...(companyData.billingAddress
-              ? { billingAddress: companyData.billingAddress }
-              : {}),
-            company: {
-              name:
-                companyData.company?.name ||
-                companyData.name ||
-                "PadiPay Technologies Ltd",
-              ...(companyData.company?.identity
-                ? { identity: companyData.company.identity }
-                : {}),
-              ...(companyData.company?.officer
-                ? {
-                    officer: {
-                      firstName: companyData.company.officer.firstName || "",
-                      lastName: companyData.company.officer.lastName || "",
-                      phone: companyData.company.officer.phone || "",
-                      email: companyData.company.officer.email || "",
-                      ...(companyData.company.officer.identity
-                        ? { identity: companyData.company.officer.identity }
-                        : {}),
-                      ...(companyData.company.officer.dob
-                        ? { dob: companyData.company.officer.dob }
-                        : {}),
-                    },
-                  }
-                : {}),
             },
           };
           const custRes = await sudoRequest({
@@ -12503,10 +12505,6 @@ exports.sudoFundAndCreateCard = onCall(
             body: custBody,
           });
           const custJson = await custRes.json();
-          console.log(
-            "[sudoFundAndCreateCard] Company customer create response:",
-            JSON.stringify(custJson),
-          );
           if (!custRes.ok)
             throw new Error(
               custJson.message || "Failed to create company Sudo customer",
@@ -12514,27 +12512,17 @@ exports.sudoFundAndCreateCard = onCall(
           companyCustomerId = custJson.data?._id;
           if (!companyCustomerId)
             throw new Error("No _id in company Sudo customer response");
-          await companyRef.update({ sudoCustomerId: companyCustomerId });
-          console.log(
-            "[sudoFundAndCreateCard] Company Sudo customer created:",
-            companyCustomerId,
+          await companySudoRef.set(
+            { sudoCustomerId: companyCustomerId },
+            { merge: true },
           );
         }
-
         effectiveCustomerId = companyCustomerId;
-        if (!effectiveCustomerId) {
-          throw new Error(
-            "Company Sudo customer could not be provisioned. Please try again or contact support.",
-          );
-        }
-        anonymousCompanyName =
-          companyData.name || "All Good Technologies Limited";
-        console.log(
-          `[sudoFundAndCreateCard] Anonymous card: company customerId=${effectiveCustomerId}`,
-        );
+        anonymousCompanyName = "PadiPay Technologies Ltd";
       }
 
       if (resolvedCurrency === "USD") {
+        // Get USD rate from company config (this is config data, not account data)
         const companyRateSnap = await db
           .collection("company")
           .doc("sudoAccountDetails")
@@ -12542,18 +12530,14 @@ exports.sudoFundAndCreateCard = onCall(
         const companyRateData = companyRateSnap.exists
           ? companyRateSnap.data() || {}
           : {};
-
         resolvedUsdNgnRate =
           toPositiveNumber(usdNgnRate) ||
-          toPositiveNumber(cardDocData.usdNgnRate) ||
           toPositiveNumber(companyRateData.usdNgnRate);
-
         if (!resolvedUsdNgnRate) {
           throw new Error(
-            "USD/NGN rate is not configured. Please contact support before creating a USD card.",
+            "USD/NGN rate is not configured. Please contact support.",
           );
         }
-
         resolvedFundAmountNgnEquivalent =
           toPositiveNumber(fundAmountNgnEquivalent) ||
           Number((resolvedFundAmount * resolvedUsdNgnRate).toFixed(2));
@@ -12561,473 +12545,176 @@ exports.sudoFundAndCreateCard = onCall(
 
       const normalizedCardType = (type || "virtual").toLowerCase();
       const shouldChargeSafehaven = normalizedCardType !== "physical";
-      if (shouldChargeSafehaven) {
-        if (resolvedCurrency === "USD") {
-          resolvedCardFeeUsd = toPositiveNumber(cardFeeUsd) || 2;
-          resolvedCardFeeNgnEquivalent =
-            toPositiveNumber(cardFeeNgnEquivalent) ||
-            Number((resolvedCardFeeUsd * resolvedUsdNgnRate).toFixed(2));
-          resolvedSafehavenChargeNgn =
-            toPositiveNumber(safehavenChargeAmountNgn) ||
-            Number(
-              (
-                (resolvedFundAmountNgnEquivalent || 0) +
-                resolvedCardFeeNgnEquivalent
-              ).toFixed(2),
+
+      if (shouldChargeSafehaven && resolvedCurrency === "NGN") {
+        resolvedCardFeeNgn = toPositiveNumber(cardFeeNgn) || 500;
+        resolvedSafehavenChargeNgn =
+          toPositiveNumber(safehavenChargeAmountNgn) || resolvedCardFeeNgn;
+
+        if (resolvedSafehavenChargeNgn > 0) {
+          const userSafehavenAccount =
+            await _getSafehavenAccountForUser(userId);
+          if (!userSafehavenAccount?.accountNumber) {
+            throw new Error(
+              "SafeHaven account not found. Please create a bank account first.",
             );
-        } else if (resolvedCurrency === "NGN") {
-          resolvedCardFeeNgn = toPositiveNumber(cardFeeNgn) || 500;
-          resolvedSafehavenChargeNgn =
-            toPositiveNumber(safehavenChargeAmountNgn) || resolvedCardFeeNgn;
-        }
-      }
+          }
 
-      if (shouldChargeSafehaven && resolvedSafehavenChargeNgn > 0) {
-        const userSafehavenAccount = await _getSafehavenAccountForUser(userId);
-        const companySafehavenAccount = await _getSafehavenCompanyMainAccount();
-        if (!userSafehavenAccount?.accountNumber) {
-          throw new Error(
-            "SafeHaven account not found. Please create a bank account first.",
+          safehavenCardChargeAmountKobo = Math.round(
+            resolvedSafehavenChargeNgn * 100,
           );
-        }
-        if (!companySafehavenAccount?.accountNumber) {
-          throw new Error(
-            "Company SafeHaven account is not configured for card charges.",
-          );
-        }
+          const paymentReference = `sudo_card_charge_${flowId}`;
+          safehavenCardChargeLogRef = db
+            .collection("sudo_card_creation_charges")
+            .doc(flowId);
 
-        safehavenCardChargeAmountKobo = Math.round(
-          resolvedSafehavenChargeNgn * 100,
-        );
-        const paymentReference = `sudo_card_charge_${flowId}`;
-        safehavenCardChargeLogRef = db
-          .collection("sudo_card_creation_charges")
-          .doc(flowId);
+          await safehavenCardChargeLogRef.set({
+            flowId,
+            userId,
+            cardDocId,
+            currency: resolvedCurrency,
+            type: normalizedCardType,
+            chargeAmountNgn: resolvedSafehavenChargeNgn,
+            chargeAmountKobo: safehavenCardChargeAmountKobo,
+            paymentReference,
+            status: "initiated",
+            provider: "safehaven",
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
 
-        await safehavenCardChargeLogRef.set({
-          flowId,
-          userId,
-          cardDocId,
-          currency: resolvedCurrency,
-          type: normalizedCardType,
-          fundAmountUsd:
-            resolvedCurrency === "USD" ? resolvedFundAmount : null,
-          fundAmountNgnEquivalent:
-            resolvedCurrency === "USD"
-              ? resolvedFundAmountNgnEquivalent
-              : null,
-          cardFeeNgn: resolvedCardFeeNgn || null,
-          cardFeeUsd: resolvedCardFeeUsd || null,
-          cardFeeNgnEquivalent: resolvedCardFeeNgnEquivalent,
-          chargeAmountNgn: resolvedSafehavenChargeNgn,
-          chargeAmountKobo: safehavenCardChargeAmountKobo,
-          paymentReference,
-          status: "initiated",
-          provider: "safehaven",
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
+          // Use the company's ACTUAL ACCOUNT NUMBER from API, not a database ID
+          safehavenCardCharge = await _safehavenBookTransferByAccountNumber({
+            uid: userId,
+            debitAccountNumber: userSafehavenAccount.accountNumber,
+            beneficiaryAccountNumber: companySafehavenAccount.accountNumber, // This is now the real 10-digit account number
+            beneficiaryBankCode: "999240",
+            amountKobo: safehavenCardChargeAmountKobo,
+            narration: `${resolvedCurrency} virtual card charge`,
+            paymentReference,
+          });
 
-        safehavenCardCharge = await _safehavenBookTransferByAccountNumber({
-          uid: userId,
-          debitAccountNumber: userSafehavenAccount.accountNumber,
-          beneficiaryAccountNumber: companySafehavenAccount.accountNumber,
-          beneficiaryBankCode: companySafehavenAccount.bankCode || "999240",
-          amountKobo: safehavenCardChargeAmountKobo,
-          narration: `${resolvedCurrency} virtual card charge`,
-          paymentReference,
-        });
+          if (safehavenCardCharge.status === "FAILED") {
+            await safehavenCardChargeLogRef.set(
+              {
+                status: "failed",
+                safehavenStatus: safehavenCardCharge.status,
+                transferId: safehavenCardCharge.id,
+              },
+              { merge: true },
+            );
+            throw new Error("SafeHaven card charge failed.");
+          }
 
-        if (safehavenCardCharge.status === "FAILED") {
           await safehavenCardChargeLogRef.set(
             {
-              status: "failed",
-              safehavenStatus: safehavenCardCharge.status,
+              status: "settled",
               transferId: safehavenCardCharge.id,
-              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+              reference: safehavenCardCharge.reference,
+              amountNgn: resolvedSafehavenChargeNgn,
+              chargedAt: admin.firestore.FieldValue.serverTimestamp(),
             },
             { merge: true },
           );
-          throw new Error("SafeHaven card charge failed.");
         }
-
-        const chargeData = {
-          provider: "safehaven",
-          status: "settled",
-          transferId: safehavenCardCharge.id,
-          reference: safehavenCardCharge.reference,
-          amountNgn: resolvedSafehavenChargeNgn,
-          amountKobo: safehavenCardChargeAmountKobo,
-          cardFeeNgn: resolvedCardFeeNgn || null,
-          cardFeeUsd: resolvedCardFeeUsd || null,
-          cardFeeNgnEquivalent: resolvedCardFeeNgnEquivalent,
-          chargedAt: admin.firestore.FieldValue.serverTimestamp(),
-        };
-        await safehavenCardChargeLogRef.set(
-          {
-            ...chargeData,
-            safehavenStatus: safehavenCardCharge.status,
-            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          },
-          { merge: true },
-        );
-        await cardRef.set({ safehavenCardCharge: chargeData }, { merge: true });
       }
 
-      // Step 0: Auto-update customer with phone, email and identity details
-      // Sudo requires these before allowing card creation, so we do it every time (idempotent)
-      // Skipped for anonymous cards (company customer; no per-user identity update)
-      if (!isAnonymousCard)
-        try {
-          const userDoc = await db.collection("users").doc(userId).get();
-          const uData = userDoc.data() || {};
-          const firstName = uData.firstName || "";
-          const lastName = uData.lastName || "";
-          const phone = uData.phone || "";
-          const email = uData.emailAddress || uData.email || "";
-          const bvn = uData.bvn || "";
-          const dob = uData.dateOfBirth || ""; // expected as YYYY-MM-DD or similar
-          const addr = uData.address || {};
-
-          // Format phone to E.164-style Nigerian number expected by Sudo
-          let formattedPhone = phone.replace(/\D/g, "");
-          if (formattedPhone.startsWith("0") && formattedPhone.length === 11) {
-            formattedPhone = "234" + formattedPhone.substring(1);
-          } else if (
-            formattedPhone.length === 10 &&
-            !formattedPhone.startsWith("234")
-          ) {
-            formattedPhone = "234" + formattedPhone;
-          }
-
-          // Format DOB to YYYY/MM/DD (Sudo's required format) from DD/MM/YYYY stored in Firestore
-          let formattedDob = dob;
-          if (dob && dob.includes("/")) {
-            const parts = dob.split("/");
-            if (parts.length === 3) {
-              if (parts[0].length === 4) {
-                // Already YYYY/MM/DD ? reformat slashes just in case
-                formattedDob = `${parts[0]}/${parts[1].padStart(2, "0")}/${parts[2].padStart(2, "0")}`;
-              } else {
-                // Assume DD/MM/YYYY ? convert to YYYY/MM/DD
-                formattedDob = `${parts[2]}/${parts[1].padStart(2, "0")}/${parts[0].padStart(2, "0")}`;
-              }
-            }
-          } else if (dob && dob.includes("-")) {
-            // Handle YYYY-MM-DD ? YYYY/MM/DD
-            formattedDob = dob.replace(/-/g, "/");
-          }
-
-          const updateBody = {
-            phoneNumber: formattedPhone || phone,
-            emailAddress: email,
-            individual: {
-              firstName,
-              lastName,
-              // dateOfBirth goes at the individual level as `dob`, format YYYY/MM/DD
-              ...(formattedDob ? { dob: formattedDob } : {}),
-              ...(bvn
-                ? {
-                    identity: {
-                      type: "BVN",
-                      number: bvn,
-                    },
-                  }
-                : {}),
-            },
-            ...(addr.street
-              ? {
-                  billingAddress: {
-                    line1: addr.street,
-                    city: addr.city || "",
-                    state: addr.state || "",
-                    country: addr.country || "NG",
-                    postalCode: String(addr.postalCode || "000000"),
-                  },
-                }
-              : {}),
-          };
-
-          console.log(
-            `[sudoFundAndCreateCard] Step 0: Updating customer ${customerId} with identity data`,
-          );
-          const updateRes = await sudoRequest({
-            url: `${SUDO_BASE_URL}/customers/${encodeURIComponent(customerId)}`,
-            method: "PUT",
-            apiKey,
-            body: updateBody,
-          });
-          const updateJson = await updateRes.json();
-          console.log(
-            "[sudoFundAndCreateCard] Customer update response:",
-            JSON.stringify(updateJson),
-          );
-          if (!updateRes.ok) {
-            console.warn(
-              "[sudoFundAndCreateCard] Customer update failed (non-fatal):",
-              updateJson.message,
-            );
-          }
-        } catch (updateErr) {
-          console.warn(
-            "[sudoFundAndCreateCard] Customer update step failed (non-fatal):",
-            updateErr.message,
-          );
-        }
-
-      // Step 1: Resolve debitAccountId
-      // Sudo requires debitAccountId on /cards. Sudo limits ONE NGN + ONE USD account per business,
-      // so all cards (anonymous or not) share the same business-level settlement accounts.
-      // Resolution order: company Firestore doc -> caller-provided -> GET /accounts -> error.
+      // Step 1: Resolve debitAccountId from Sudo API (NOT from Firestore)
       let effectiveDebitAccountId = "";
       {
-        const companyRef = db.collection("company").doc("sudoAccountDetails");
-        const companySnap = await companyRef.get();
-        const companyData = companySnap.exists ? companySnap.data() || {} : {};
-        const accountField =
-          resolvedCurrency === "USD" ? "sudoUsdAccountId" : "sudoNgnAccountId";
+        // Fetch accounts directly from Sudo API
+        const accsRes = await sudoRequest({
+          url: `${SUDO_BASE_URL}/accounts`,
+          method: "GET",
+          apiKey,
+        });
+        const accsJson = await accsRes.json();
+        console.log(
+          `[sudoFundAndCreateCard] GET /accounts:`,
+          JSON.stringify(accsJson),
+        );
 
-        // 1. Check company doc first
-        effectiveDebitAccountId = companyData[accountField] || "";
-
-        // 2. If caller passed a known account ID, adopt it
-        if (
-          !effectiveDebitAccountId &&
-          debitAccountId &&
-          typeof debitAccountId === "string" &&
-          debitAccountId.length === 24
-        ) {
-          effectiveDebitAccountId = debitAccountId;
-          console.log(
-            `[sudoFundAndCreateCard] Adopting caller-provided debitAccountId: ${effectiveDebitAccountId}`,
+        if (accsRes.ok && Array.isArray(accsJson.data)) {
+          const match = accsJson.data.find(
+            (a) =>
+              (a.type || "").toLowerCase() === "account" &&
+              (a.currency || "").toUpperCase() === resolvedCurrency,
           );
-          await companyRef.set(
-            { [accountField]: effectiveDebitAccountId },
-            { merge: true },
-          );
-        }
-
-        // 3. GET /accounts to find the business settlement account
-        if (!effectiveDebitAccountId) {
-          try {
-            const accsRes = await sudoRequest({
-              url: `${SUDO_BASE_URL}/accounts`,
-              method: "GET",
-              apiKey,
-            });
-            const accsJson = await accsRes.json();
+          if (
+            match?._id &&
+            typeof match._id === "string" &&
+            match._id.length === 24
+          ) {
+            effectiveDebitAccountId = match._id;
             console.log(
-              `[sudoFundAndCreateCard] GET /accounts:`,
-              JSON.stringify(accsJson),
-            );
-            if (accsRes.ok && Array.isArray(accsJson.data)) {
-              const match = accsJson.data.find(
-                (a) =>
-                  (a.type || "").toLowerCase() === "account" &&
-                  (a.currency || "").toUpperCase() === resolvedCurrency,
-              );
-              if (
-                match?._id &&
-                typeof match._id === "string" &&
-                match._id.length === 24
-              ) {
-                effectiveDebitAccountId = match._id;
-                await companyRef.set(
-                  { [accountField]: effectiveDebitAccountId },
-                  { merge: true },
-                );
-                console.log(
-                  `[sudoFundAndCreateCard] Found ${resolvedCurrency} settlement account: ${effectiveDebitAccountId}`,
-                );
-              }
-            }
-          } catch (listErr) {
-            console.warn(
-              "[sudoFundAndCreateCard] GET /accounts failed:",
-              listErr.message,
+              `[sudoFundAndCreateCard] Found ${resolvedCurrency} settlement account from API: ${effectiveDebitAccountId}`,
             );
           }
         }
 
         if (!effectiveDebitAccountId) {
           throw new Error(
-            `Card setup incomplete: no ${resolvedCurrency} settlement account found. ` +
-              `Please contact support or try again.`,
+            `Card setup incomplete: no ${resolvedCurrency} settlement account found from Sudo API.`,
           );
         }
-
-        console.log(
-          `[sudoFundAndCreateCard] Resolved debitAccountId (${resolvedCurrency}): ${effectiveDebitAccountId}`,
-        );
       }
 
-      // Step 1.5: Resolve fundingSourceId.
-      // USD cards require an active default funding source; other currencies use an active gateway source.
-      // Resolution order: company Firestore doc -> caller-provided -> GET /fundingsources -> auto-create -> error.
+      // Step 2: Resolve fundingSourceId from Sudo API
       let effectiveFundingSourceId = "";
       {
-        const companyRef = db.collection("company").doc("sudoAccountDetails");
-        const companySnap = await companyRef.get();
-        const companyData = companySnap.exists ? companySnap.data() || {} : {};
         const needsDefaultFundingSource = resolvedCurrency === "USD";
         const requiredFundingType = needsDefaultFundingSource
           ? "default"
           : "gateway";
-        const fundingSourceField = needsDefaultFundingSource
-          ? "sudoUsdFundingSourceId"
-          : "sudoFundingSourceId";
 
-        const fetchFundingSources = async () => {
-          try {
-            const fsRes = await sudoRequest({
-              url: `${SUDO_BASE_URL}/fundingsources`,
-              method: "GET",
-              apiKey,
-            });
-            const fsJson = await fsRes.json();
+        const fsRes = await sudoRequest({
+          url: `${SUDO_BASE_URL}/fundingsources`,
+          method: "GET",
+          apiKey,
+        });
+        const fsJson = await fsRes.json();
+        console.log(
+          "[sudoFundAndCreateCard] GET /fundingsources:",
+          JSON.stringify(fsJson),
+        );
+
+        if (fsRes.ok && Array.isArray(fsJson.data)) {
+          const match = fsJson.data.find(
+            (f) =>
+              (f.type || "").toLowerCase() === requiredFundingType &&
+              (f.status || "").toLowerCase() === "active" &&
+              f?.isDeleted !== true,
+          );
+          if (match?._id) {
+            effectiveFundingSourceId = match._id;
             console.log(
-              "[sudoFundAndCreateCard] GET /fundingsources:",
-              JSON.stringify(fsJson),
-            );
-            if (fsRes.ok && Array.isArray(fsJson.data)) {
-              return fsJson.data;
-            }
-          } catch (fsErr) {
-            console.warn(
-              "[sudoFundAndCreateCard] GET /fundingsources failed:",
-              fsErr.message,
-            );
-          }
-          return [];
-        };
-
-        const isActiveRequiredType = (f) =>
-          (f?.type || "").toLowerCase() === requiredFundingType &&
-          (f?.status || "").toLowerCase() === "active" &&
-          f?.isDeleted !== true;
-
-        const firstActiveRequiredType = (sources) =>
-          sources.find(
-            (f) => isActiveRequiredType(f) && f?.isDefault === true,
-          ) || sources.find((f) => isActiveRequiredType(f));
-
-        const fundingSources = await fetchFundingSources();
-        const activeFundingSource = firstActiveRequiredType(fundingSources);
-        const activeFundingSourceId =
-          activeFundingSource?._id &&
-          typeof activeFundingSource._id === "string"
-            ? activeFundingSource._id
-            : "";
-
-        // 1. Check company doc first
-        const companyFundingSourceId = (
-          companyData[fundingSourceField] || ""
-        ).toString();
-        if (companyFundingSourceId) {
-          const companySource = fundingSources.find(
-            (f) => (f?._id || "").toString() === companyFundingSourceId,
-          );
-          if (companySource && isActiveRequiredType(companySource)) {
-            effectiveFundingSourceId = companyFundingSourceId;
-          } else {
-            console.warn(
-              `[sudoFundAndCreateCard] Ignoring inactive/stale company ${requiredFundingType} fundingSourceId: ${companyFundingSourceId}`,
-            );
-            await companyRef.set({ [fundingSourceField]: "" }, { merge: true });
-          }
-        }
-
-        // 2. If caller passed one, adopt it and persist for subsequent card creations
-        if (
-          !effectiveFundingSourceId &&
-          fundingSourceId &&
-          typeof fundingSourceId === "string"
-        ) {
-          const callerFundingSourceId = fundingSourceId.trim();
-          const callerSource = fundingSources.find(
-            (f) => (f?._id || "").toString() === callerFundingSourceId,
-          );
-          if (callerSource && isActiveRequiredType(callerSource)) {
-            effectiveFundingSourceId = callerFundingSourceId;
-            await companyRef.set(
-              { [fundingSourceField]: effectiveFundingSourceId },
-              { merge: true },
-            );
-            console.log(
-              `[sudoFundAndCreateCard] Adopting caller-provided active ${requiredFundingType} fundingSourceId: ${effectiveFundingSourceId}`,
-            );
-          } else {
-            console.warn(
-              `[sudoFundAndCreateCard] Ignoring caller fundingSourceId because it is not an active ${requiredFundingType} source: ${callerFundingSourceId}`,
+              `[sudoFundAndCreateCard] Found ${requiredFundingType} funding source from API: ${effectiveFundingSourceId}`,
             );
           }
         }
 
-        // 3. Use active funding source from /fundingsources for this currency profile
-        if (!effectiveFundingSourceId && activeFundingSourceId) {
-          effectiveFundingSourceId = activeFundingSourceId;
-          await companyRef.set(
-            { [fundingSourceField]: effectiveFundingSourceId },
-            { merge: true },
-          );
-          console.log(
-            `[sudoFundAndCreateCard] Using active ${requiredFundingType} fundingSourceId from /fundingsources: ${effectiveFundingSourceId}`,
-          );
-        }
-
-        // 4. Auto-create required funding source type if still not resolved
         if (!effectiveFundingSourceId) {
-          try {
-            console.log(
-              `[sudoFundAndCreateCard] No active ${requiredFundingType} fundingSourceId found - auto-creating ${requiredFundingType} funding source...`,
-            );
-            const createFsRes = await sudoRequest({
-              url: `${SUDO_BASE_URL}/fundingsources`,
-              method: "POST",
-              apiKey,
-              body: { type: requiredFundingType, status: "active" },
-            });
-            const createFsJson = await createFsRes.json();
-            console.log(
-              "[sudoFundAndCreateCard] Auto-create fundingSource response:",
-              JSON.stringify(createFsJson),
-            );
-            const createdId = createFsJson?.data?._id;
-            if (createFsRes.ok && createdId && typeof createdId === "string") {
-              effectiveFundingSourceId = createdId;
-              await companyRef.set(
-                { [fundingSourceField]: effectiveFundingSourceId },
-                { merge: true },
-              );
-              console.log(
-                `[sudoFundAndCreateCard] Auto-created ${requiredFundingType} fundingSourceId: ${effectiveFundingSourceId}`,
-              );
-            } else {
-              console.error(
-                "[sudoFundAndCreateCard] Auto-create fundingSource failed:",
-                createFsJson?.message || `HTTP ${createFsRes.status}`,
-              );
-            }
-          } catch (createFsErr) {
-            console.error(
-              "[sudoFundAndCreateCard] Auto-create fundingSource error:",
-              createFsErr.message,
+          console.log(
+            `[sudoFundAndCreateCard] Creating ${requiredFundingType} funding source...`,
+          );
+          const createFsRes = await sudoRequest({
+            url: `${SUDO_BASE_URL}/fundingsources`,
+            method: "POST",
+            apiKey,
+            body: { type: requiredFundingType, status: "active" },
+          });
+          const createFsJson = await createFsRes.json();
+          const createdId = createFsJson?.data?._id;
+          if (createFsRes.ok && createdId) {
+            effectiveFundingSourceId = createdId;
+          } else {
+            throw new Error(
+              `Could not create ${requiredFundingType} funding source`,
             );
           }
-        }
-
-        if (effectiveFundingSourceId) {
-          console.log(
-            `[sudoFundAndCreateCard] Resolved fundingSourceId: ${effectiveFundingSourceId}`,
-          );
-        } else {
-          throw new Error(
-            `Card setup incomplete: no active ${requiredFundingType} fundingSourceId found and auto-create failed. ` +
-              "Please verify Sudo funding sources and try again.",
-          );
         }
       }
 
-      // Step 2: Create the card
+      // Step 3: Create the card
       const isPhysical = (type || "virtual") === "physical";
       const resolvedIssuerCountry =
         issuerCountry || (resolvedCurrency === "USD" ? "USA" : "NGA");
@@ -13037,8 +12724,6 @@ exports.sudoFundAndCreateCard = onCall(
         if (val.includes("verve")) return "Verve";
         return "Verve";
       };
-      const isLinkedPhysicalError = (msg) =>
-        /already linked|not fetched/i.test((msg || "").toString());
 
       let currentInventoryCardDocId = cardDocData.inventoryCardDocId || null;
       let currentPhysicalCardNumber = "";
@@ -13046,91 +12731,24 @@ exports.sudoFundAndCreateCard = onCall(
         brand || cardDocData.scheme || "Verve",
       );
 
-      const reserveReplacementPhysicalNumber = async () => {
-        const nextInvSnap = await db
-          .collection("physical_card_inventory")
-          .where("brand", "==", currentPhysicalBrand)
-          .where("status", "==", "unassigned")
-          .limit(1)
-          .get();
-
-        if (nextInvSnap.empty) return null;
-
-        const nextInvDoc = nextInvSnap.docs[0];
-        const nextInvData = nextInvDoc.data() || {};
-        const nextNumber = (nextInvData.cardNumber || "").toString().trim();
-        if (!nextNumber) return null;
-
-        const etaDate =
-          cardDocData?.physicalCardTracking?.etaDate ||
-          new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
-
-        await nextInvDoc.ref.update({
-          status: "assigned",
-          assignedUserId: userId,
-          assignedAt: admin.firestore.FieldValue.serverTimestamp(),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          tracking: {
-            status: "pending",
-            note: "Order confirmed. Card is being prepared.",
-            etaDate,
-            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          },
-        });
-
-        await cardRef.update({
-          inventoryCardDocId: nextInvDoc.id,
-          assignedPhysicalCardNumber: nextNumber,
-          physicalCardDelivered: false,
-          physicalCardTracking: {
-            status: "pending",
-            note: "Order confirmed. Card is being prepared.",
-            etaDate,
-          },
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
-
-        return { nextInventoryCardDocId: nextInvDoc.id, nextNumber };
-      };
-
-      // Resolve physical card number from inventory-backed Firestore assignment first,
-      // then fallback to caller payload for backward compatibility.
       if (isPhysical) {
         currentPhysicalCardNumber = (
           cardDocData.assignedPhysicalCardNumber ||
-          cardDocData.cardNumber ||
           cardNumber ||
           ""
         )
           .toString()
           .trim();
-
         if (!currentPhysicalCardNumber) {
           throw new Error(
-            "Physical card creation requires an assigned inventory card number, but none was found.",
+            "Physical card creation requires an assigned inventory card number.",
           );
         }
-
-        const maskedPhysical =
-          currentPhysicalCardNumber.length > 4
-            ? `${"*".repeat(currentPhysicalCardNumber.length - 4)}${currentPhysicalCardNumber.slice(-4)}`
-            : currentPhysicalCardNumber;
-
-        console.log("[sudoFundAndCreateCard] Physical number resolved", {
-          flowId,
-          source: cardDocData.assignedPhysicalCardNumber
-            ? "cardDoc.assignedPhysicalCardNumber"
-            : cardDocData.cardNumber
-              ? "cardDoc.cardNumber"
-              : cardNumber
-                ? "payload.cardNumber"
-                : "none",
-          maskedPhysical,
-          inventoryCardDocId: cardDocData.inventoryCardDocId || null,
-        });
       }
+
       const maxCreateAttempts = isPhysical ? 2 : 1;
       let cardData = null;
+
       for (let attempt = 1; attempt <= maxCreateAttempts; attempt++) {
         const cardReference = `PADI-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
         const cardBody = {
@@ -13140,9 +12758,7 @@ exports.sudoFundAndCreateCard = onCall(
           status: "active",
           brand: brand || "Verve",
           debitAccountId: effectiveDebitAccountId,
-          ...(effectiveFundingSourceId
-            ? { fundingSourceId: effectiveFundingSourceId }
-            : {}),
+          fundingSourceId: effectiveFundingSourceId,
           amount: resolvedFundAmount,
           issuerCountry: resolvedIssuerCountry,
           ...(isPhysical && {
@@ -13151,18 +12767,6 @@ exports.sudoFundAndCreateCard = onCall(
           }),
         };
 
-        console.log("[sudoFundAndCreateCard] Creating card", {
-          flowId,
-          attempt,
-          type: cardBody.type,
-          brand: cardBody.brand,
-          currency: cardBody.currency,
-          issuerCountry: cardBody.issuerCountry,
-          hasNumber: !!cardBody.number,
-          cardReference: cardBody.cardReference || null,
-          inventoryCardDocId: currentInventoryCardDocId,
-        });
-
         const cardResponse = await sudoRequest({
           url: `${SUDO_BASE_URL}/cards`,
           method: "POST",
@@ -13170,14 +12774,6 @@ exports.sudoFundAndCreateCard = onCall(
           body: cardBody,
         });
         const cardJson = await cardResponse.json();
-        console.log("[sudoFundAndCreateCard] createCard response", {
-          flowId,
-          attempt,
-          ok: cardResponse.ok,
-          statusCode: cardJson?.statusCode || cardResponse.status,
-          cardId: cardJson?.data?._id || null,
-          message: cardJson?.message || null,
-        });
 
         if (
           cardResponse.ok &&
@@ -13186,112 +12782,30 @@ exports.sudoFundAndCreateCard = onCall(
           cardData = cardJson.data;
           break;
         }
-
-        const msg =
-          parseSudoMessage(cardJson.message) || "Card creation failed";
-        if (
-          isPhysical &&
-          attempt < maxCreateAttempts &&
-          isLinkedPhysicalError(msg)
-        ) {
-          console.warn(
-            "[sudoFundAndCreateCard] Physical PAN already linked; rotating inventory and retrying",
-            {
-              flowId,
-              attempt,
-              inventoryCardDocId: currentInventoryCardDocId,
-              reason: msg,
-            },
-          );
-
-          if (currentInventoryCardDocId) {
-            await db
-              .collection("physical_card_inventory")
-              .doc(currentInventoryCardDocId)
-              .set(
-                {
-                  status: "invalid_linked",
-                  invalidReason: msg,
-                  invalidatedAt: admin.firestore.FieldValue.serverTimestamp(),
-                  updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-                },
-                { merge: true },
-              )
-              .catch((invErr) => {
-                console.warn(
-                  "[sudoFundAndCreateCard] Failed to mark invalid inventory PAN",
-                  {
-                    flowId,
-                    inventoryCardDocId: currentInventoryCardDocId,
-                    error: invErr.message,
-                  },
-                );
-              });
-          }
-
-          const replacement = await reserveReplacementPhysicalNumber();
-          if (!replacement) {
-            throw new Error(
-              `${msg}. No replacement physical card number is available for ${currentPhysicalBrand}.`,
-            );
-          }
-
-          currentInventoryCardDocId = replacement.nextInventoryCardDocId;
-          currentPhysicalCardNumber = replacement.nextNumber;
-
-          console.log("[sudoFundAndCreateCard] Physical PAN rotated", {
-            flowId,
-            nextInventoryCardDocId: currentInventoryCardDocId,
-            maskedPhysical:
-              currentPhysicalCardNumber.length > 4
-                ? `${"*".repeat(currentPhysicalCardNumber.length - 4)}${currentPhysicalCardNumber.slice(-4)}`
-                : currentPhysicalCardNumber,
-          });
-
-          continue;
-        }
-
-        throw new Error(msg);
-      }
-
-      if (!cardData) {
-        throw new Error("Card creation failed after retry.");
-      }
-
-      const cardId = cardData?._id;
-
-      if (!cardId) {
         throw new Error(
-          `Card creation succeeded but no _id returned: ${JSON.stringify(cardData)}`,
+          parseSudoMessage(cardJson.message) || "Card creation failed",
         );
       }
 
-      // Step 3: Update Firestore card doc to active
+      if (!cardData) throw new Error("Card creation failed after retry.");
+
+      const cardId = cardData?._id;
+      if (!cardId)
+        throw new Error(`Card creation succeeded but no _id returned`);
+
+      // Update Firestore card doc
       await cardRef.update({
         status: "active",
         card_id: cardId,
         sudoCardData: cardData,
         provider: "sudo",
         sudoAccountId: effectiveDebitAccountId,
-        ...(resolvedCurrency === "USD" && resolvedUsdNgnRate
-          ? {
-              usdNgnRate: resolvedUsdNgnRate,
-              fundAmountUsd: resolvedFundAmount,
-              fundAmountNgnEquivalent: resolvedFundAmountNgnEquivalent,
-            }
-          : {}),
         ...(isAnonymousCard && anonymousCompanyName
           ? { nameOnCard: anonymousCompanyName }
           : {}),
       });
-      console.log("[sudoFundAndCreateCard] Card saved", {
-        flowId,
-        cardId,
-        userId,
-        cardDocId,
-      });
 
-      // Step 3.5: Auto-change card PIN from Sudo default to user's chosen PIN
+      // Auto-change PIN
       try {
         const latestCardDocSnap = await cardRef.get();
         const userPin = latestCardDocSnap.data()?.pin;
@@ -13310,284 +12824,78 @@ exports.sudoFundAndCreateCard = onCall(
               apiKey,
               body: { oldPin: defaultPin, newPin: userPin },
             });
-            console.log("[sudoFundAndCreateCard] PIN auto-changed", {
-              flowId,
-              cardId,
-            });
-          } else {
-            console.warn(
-              "[sudoFundAndCreateCard] Could not retrieve default PIN",
-              { flowId, cardId },
-            );
           }
         }
       } catch (pinErr) {
         console.warn(
-          "[sudoFundAndCreateCard] PIN auto-change failed (non-fatal)",
-          {
-            flowId,
-            cardId,
-            error: pinErr.message,
-          },
+          "[sudoFundAndCreateCard] PIN auto-change failed:",
+          pinErr.message,
         );
       }
 
-      // Step 4: Notify user and save to notifications collection
       await sendAndSaveNotification(
         "Your card is ready!",
         `Your ${resolvedCurrency} virtual card has been created successfully.`,
         "card_created",
       );
-
-      // Step 5: Send confirmation email
       await sendCardEmail(
-        `Your ${resolvedCurrency} Card is Ready! ?? ? PadiPay`,
-        `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#111827;">
-          <h2 style="margin:0 0 16px;color:#10b981;">Your ${resolvedCurrency} Card is Ready! ??</h2>
-          <p style="margin:0 0 16px;">Great news! Your ${resolvedCurrency} virtual card has been created successfully on PadiPay.</p>
-          <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin:0 0 16px;">
-            <p style="margin:0 0 8px;"><strong>Card type:</strong> ${type || "Virtual"}</p>
-            <p style="margin:0;"><strong>Currency:</strong> ${resolvedCurrency}</p>
-          </div>
-          <p style="margin:0 0 16px;">You can now use your card for online payments. Open the PadiPay app to view your card details.</p>
-          <p style="margin:0;color:#6b7280;font-size:13px;">If you did not request this card, please contact PadiPay support immediately.</p>
-        </div>`,
-        `Your ${resolvedCurrency} card has been created successfully on PadiPay. Open the app to view your card details.`,
+        `Your ${resolvedCurrency} Card is Ready! 🎉 - PadiPay`,
+        `<div>Your ${resolvedCurrency} virtual card has been created successfully.</div>`,
+        `Your ${resolvedCurrency} card has been created successfully.`,
       );
 
-      console.log("[sudoFundAndCreateCard] SUCCESS", {
-        flowId,
-        userId,
-        cardDocId,
-        cardId,
-      });
       return { success: true, cardId, flowId };
     } catch (err) {
       console.error("[sudoFundAndCreateCard] ERROR", {
         flowId,
-        userId,
-        cardDocId,
-        type,
-        currency: resolvedCurrency,
         error: err.message,
         stack: err.stack,
       });
 
+      // Refund logic if needed
       if (
         safehavenCardCharge &&
         safehavenCardCharge.status !== "FAILED" &&
         safehavenCardChargeAmountKobo > 0
       ) {
         try {
-          const userSafehavenAccount = await _getSafehavenAccountForUser(userId);
-          const companySafehavenAccount = await _getSafehavenCompanyMainAccount();
-          if (!userSafehavenAccount?.accountNumber) {
-            throw new Error("User SafeHaven account missing for card refund.");
+          const userSafehavenAccount =
+            await _getSafehavenAccountForUser(userId);
+          const companySafehavenAccount =
+            await _getSafehavenCompanyMainAccount();
+          if (
+            userSafehavenAccount?.accountNumber &&
+            companySafehavenAccount?.accountNumber
+          ) {
+            await _safehavenBookTransferByAccountNumber({
+              uid: userId,
+              debitAccountNumber: companySafehavenAccount.accountNumber,
+              beneficiaryAccountNumber: userSafehavenAccount.accountNumber,
+              beneficiaryBankCode: "999240",
+              amountKobo: safehavenCardChargeAmountKobo,
+              narration: `${resolvedCurrency} virtual card refund`,
+              paymentReference: `sudo_card_refund_${flowId}`,
+            });
           }
-          if (!companySafehavenAccount?.accountNumber) {
-            throw new Error("Company SafeHaven account missing for card refund.");
-          }
-
-          const refundReference = `sudo_card_refund_${flowId}`;
-          const refundTransfer = await _safehavenBookTransferByAccountNumber({
-            uid: userId,
-            debitAccountNumber: companySafehavenAccount.accountNumber,
-            beneficiaryAccountNumber: userSafehavenAccount.accountNumber,
-            beneficiaryBankCode: userSafehavenAccount.bankCode || "999240",
-            amountKobo: safehavenCardChargeAmountKobo,
-            narration: `${resolvedCurrency} virtual card refund`,
-            paymentReference: refundReference,
-          });
-
-          const refundData = {
-            status: "refunded",
-            refundTransferId: refundTransfer.id,
-            refundReference: refundTransfer.reference,
-            refundStatus: refundTransfer.status,
-            refundedAt: admin.firestore.FieldValue.serverTimestamp(),
-          };
-          await safehavenCardChargeLogRef
-            ?.set(
-              {
-                ...refundData,
-                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-              },
-              { merge: true },
-            )
-            .catch(() => {});
-          await cardRef
-            .set(
-              {
-                "safehavenCardCharge.status": refundData.status,
-                "safehavenCardCharge.refundTransferId":
-                  refundData.refundTransferId,
-                "safehavenCardCharge.refundReference":
-                  refundData.refundReference,
-                "safehavenCardCharge.refundStatus": refundData.refundStatus,
-                "safehavenCardCharge.refundedAt": refundData.refundedAt,
-              },
-              { merge: true },
-            )
-            .catch(() => {});
         } catch (refundErr) {
-          console.error("[sudoFundAndCreateCard] SafeHaven refund failed", {
-            flowId,
-            userId,
-            cardDocId,
-            error: refundErr.message,
-          });
-          const refundFailure = {
-            status: "refund_failed",
-            refundError: refundErr.message || "unknown",
-            refundFailedAt: admin.firestore.FieldValue.serverTimestamp(),
-          };
-          await safehavenCardChargeLogRef
-            ?.set(
-              {
-                ...refundFailure,
-                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-              },
-              { merge: true },
-            )
-            .catch(() => {});
-          await cardRef
-            .set(
-              {
-                "safehavenCardCharge.status": refundFailure.status,
-                "safehavenCardCharge.refundError": refundFailure.refundError,
-                "safehavenCardCharge.refundFailedAt":
-                  refundFailure.refundFailedAt,
-              },
-              { merge: true },
-            )
-            .catch(() => {});
+          console.error(
+            "[sudoFundAndCreateCard] Refund failed:",
+            refundErr.message,
+          );
         }
       }
 
-      // If a physical card inventory PAN was assigned for this attempt,
-      // release it back to inventory so it can be reused on future requests.
-      try {
-        const failedCardSnap = await cardRef.get();
-        const failedCardData = failedCardSnap.exists
-          ? failedCardSnap.data() || {}
-          : {};
-        const isPhysicalCard =
-          (failedCardData.type || type || "").toString().toLowerCase() ===
-          "physical";
-        const inventoryCardDocId = (
-          failedCardData.inventoryCardDocId || ""
-        ).toString();
-
-        if (isPhysicalCard && inventoryCardDocId) {
-          const inventoryRef = db
-            .collection("physical_card_inventory")
-            .doc(inventoryCardDocId);
-          const inventorySnap = await inventoryRef.get();
-          const inventoryData = inventorySnap.exists
-            ? inventorySnap.data() || {}
-            : {};
-          const inventoryStatus = (inventoryData.status || "")
-            .toString()
-            .toLowerCase();
-          const assignedUserId = (
-            inventoryData.assignedUserId || ""
-          ).toString();
-          const assignedCardDocId = (
-            inventoryData.assignedCardDocId || ""
-          ).toString();
-
-          if (inventorySnap.exists) {
-            await inventoryRef.update({
-              status: "unassigned",
-              assignedUserId: admin.firestore.FieldValue.delete(),
-              assignedAt: admin.firestore.FieldValue.delete(),
-              assignedCardDocId: admin.firestore.FieldValue.delete(),
-              assignedCardDocPath: admin.firestore.FieldValue.delete(),
-              tracking: {
-                status: "pending",
-                note: "Released after failed card creation",
-                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-              },
-              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-            });
-
-            await cardRef.update({
-              inventoryCardDocId: admin.firestore.FieldValue.delete(),
-              assignedPhysicalCardNumber: admin.firestore.FieldValue.delete(),
-              physicalCardDelivered: admin.firestore.FieldValue.delete(),
-              physicalCardTracking: admin.firestore.FieldValue.delete(),
-              inventoryAssignmentReleasedAt:
-                admin.firestore.FieldValue.serverTimestamp(),
-              inventoryAssignmentReleaseReason: err.message || "unknown",
-            });
-
-            console.log(
-              "[sudoFundAndCreateCard] Released physical inventory assignment after failure",
-              {
-                flowId,
-                inventoryCardDocId,
-                userId,
-                cardDocId,
-                previousStatus: inventoryStatus || null,
-              },
-            );
-          } else {
-            console.warn("[sudoFundAndCreateCard] Skipped inventory release", {
-              flowId,
-              inventoryCardDocId,
-              reason: "inventory document not found",
-              inventoryStatus,
-              assignedUserId,
-              assignedCardDocId,
-            });
-          }
-        }
-      } catch (releaseErr) {
-        console.error(
-          "[sudoFundAndCreateCard] Failed to release physical inventory assignment",
-          {
-            flowId,
-            userId,
-            cardDocId,
-            error: releaseErr.message,
-          },
-        );
-      }
-
-      // Mark card as failed
       await cardRef
         .update({
           status: "failed",
-          lastServerError: err.message || "unknown",
+          lastServerError: err.message,
           lastServerErrorAt: admin.firestore.FieldValue.serverTimestamp(),
-          flowId,
         })
         .catch(() => {});
-
-      // Only surface user-friendly Sudo messages (card brand/type availability).
-      // Technical errors (account IDs, validation, internal config) use a generic message.
-      const rawMsg = err.message || "";
-      const isUserFriendly = /not available at the moment/i.test(rawMsg);
-      const userMsg = isUserFriendly
-        ? `We couldn't create your card: ${rawMsg}`
-        : "We couldn't create your card. Please try again later.";
-      const emailReason = isUserFriendly
-        ? `<p style="margin:0 0 16px;"><strong>Reason:</strong> ${rawMsg}</p>`
-        : "";
-
       await sendAndSaveNotification(
         "Card creation failed",
-        userMsg,
+        "We couldn't create your card. Please try again later.",
         "card_failed",
-      );
-      await sendCardEmail(
-        `Card Creation Failed ? PadiPay`,
-        `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#111827;">
-          <h2 style="margin:0 0 16px;color:#ef4444;">Card Creation Failed</h2>
-          <p style="margin:0 0 16px;">Unfortunately, we were unable to create your ${resolvedCurrency} card on PadiPay.</p>
-          ${emailReason}<p style="margin:0 0 16px;">Please try again from the app. If the problem persists, contact PadiPay support.</p>
-        </div>`,
-        `${userMsg} If the problem persists, contact PadiPay support.`,
       );
       throw new HttpsError("internal", err.message);
     }
@@ -14782,7 +14090,10 @@ exports.sudoWebhook = onRequest(
     };
 
     const getSafehavenCompanyAccount = async () => {
-      const companySnap = await db.collection("company").doc("account_details").get();
+      const companySnap = await db
+        .collection("company")
+        .doc("account_details")
+        .get();
       const companyData = companySnap.exists ? companySnap.data() || {} : {};
       if (companyData.accountId && companyData.accountNumber) {
         return {
@@ -15297,7 +14608,9 @@ exports.sudoWebhook = onRequest(
               sendErr.message,
             );
             try {
-              const userAccount = await _getSafehavenAccountForUser(found.userId);
+              const userAccount = await _getSafehavenAccountForUser(
+                found.userId,
+              );
               const companyAccount = await getSafehavenCompanyAccount();
               if (userAccount?.accountNumber && companyAccount?.accountNumber) {
                 const reversalKey = `sudo_prefund_reversal_${prefundLogKey}`;
@@ -15805,13 +15118,11 @@ exports.dailySubscriptionReminders = onSchedule(
           const userSnap = await db.collection("users").doc(userId).get();
           const userData = userSnap.data() || {};
           if (userData.deviceToken) {
-            await admin
-              .messaging()
-              .send({
-                token: userData.deviceToken,
-                notification: { title: notifTitle, body: notifBody },
-                ...FCM_CHANNEL,
-              });
+            await admin.messaging().send({
+              token: userData.deviceToken,
+              notification: { title: notifTitle, body: notifBody },
+              ...FCM_CHANNEL,
+            });
           }
           if (userData.email) {
             await sendNotifyEmail({
