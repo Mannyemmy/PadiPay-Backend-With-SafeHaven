@@ -2259,21 +2259,29 @@ const onCallLogged = (functionName, options, handler) =>
   });
 
 /**
- * Looks up a user document in Firestore and returns the Safehaven
- * account number and _id from getAnchorData.virtualAccount.
+ * Looks up a user document in Firestore and returns the SafeHaven
+ * account number and _id from safehavenData.virtualAccount.
  */
 const _getSafehavenAccountForUser = async (uid) => {
   const snap = await db.collection("users").doc(uid).get();
-  if (!snap.exists) return null;
+  let setupData = null;
+  try {
+    const setupSnap = await db.collection("safehavenUserSetup").doc(uid).get();
+    setupData = setupSnap.exists ? setupSnap.data() || {} : null;
+  } catch (e) {
+    console.warn("[_getSafehavenAccountForUser] setup lookup failed:", e.message);
+  }
+  if (!snap.exists && !setupData) return null;
   const userData = snap.data() || {};
-  const va =
-    userData?.getAnchorData?.virtualAccount?.data ||
-    userData?.safehavenData?.virtualAccount?.data;
-  if (!va) return null;
+  const va = userData?.safehavenData?.virtualAccount?.data;
+  if (!va && !setupData) return null;
+  const rawBankCode =
+    va?.attributes?.bank?.id || setupData?.safehavenBankCode || "999240";
   return {
-    accountId: va.id || "",
-    accountNumber: va.attributes?.accountNumber || "",
-    bankCode: va.attributes?.bank?.id || "999240",
+    accountId: va?.id || setupData?.safehavenAccountId || "",
+    accountNumber:
+      va?.attributes?.accountNumber || setupData?.safehavenAccountNumber || "",
+    bankCode: rawBankCode === "090286" ? "999240" : rawBankCode,
   };
 };
 
@@ -2356,6 +2364,98 @@ const _safehavenListMainAccounts = async () => {
     isSubAccount: Boolean(r?.isSubAccount),
     status: String(r?.status || "").trim(),
   }));
+};
+
+const _safehavenNormalizeBankCode = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw || raw === "090286" || _looksLikeLegacyAnchorId(raw)) return "999240";
+  return raw;
+};
+
+const _getSafehavenCompanyMainAccount = async () => {
+  const companySnap = await db.collection("company").doc("account_details").get();
+  const companyData = companySnap.exists ? companySnap.data() || {} : {};
+  const firestoreAccount = {
+    accountId: String(companyData.accountId || companyData.id || "").trim(),
+    accountNumber: String(companyData.accountNumber || "").trim(),
+    accountName: String(companyData.accountName || "").trim(),
+    bankCode: _safehavenNormalizeBankCode(
+      companyData.bankId || companyData.bankCode || "999240",
+    ),
+  };
+
+  if (firestoreAccount.accountNumber) return firestoreAccount;
+
+  const accounts = await _safehavenListMainAccounts();
+  const active = accounts.filter(
+    (a) => !a.isSubAccount && a.status.toLowerCase() !== "inactive",
+  );
+  const matched = active.find((a) => a.isDefault) || active[0] || null;
+  if (!matched?.accountNumber) return null;
+
+  return {
+    accountId: matched.id,
+    accountNumber: matched.accountNumber,
+    accountName: matched.accountName,
+    bankCode: "999240",
+  };
+};
+
+const _safehavenBookTransferByAccountNumber = async ({
+  uid,
+  debitAccountNumber,
+  beneficiaryAccountNumber,
+  beneficiaryBankCode = "999240",
+  amountKobo,
+  narration,
+  paymentReference,
+}) => {
+  const amount = Number(amountKobo || 0);
+  if (!debitAccountNumber || !beneficiaryAccountNumber || amount <= 0) {
+    throw new HttpsError(
+      "failed-precondition",
+      "SafeHaven transfer account details are incomplete",
+    );
+  }
+
+  const normalizedBankCode = _safehavenNormalizeBankCode(beneficiaryBankCode);
+  const enquiry = await _safehavenNameEnquiry(
+    uid,
+    normalizedBankCode,
+    beneficiaryAccountNumber,
+  );
+  const nameEnquiryReference = enquiry.nameEnquiryReference;
+  if (!nameEnquiryReference) {
+    throw new HttpsError(
+      "failed-precondition",
+      "Name enquiry failed for SafeHaven transfer",
+    );
+  }
+
+  const requestBody = {
+    nameEnquiryReference,
+    debitAccountNumber,
+    beneficiaryBankCode: normalizedBankCode,
+    beneficiaryAccountNumber,
+    narration,
+    amount: amount / 100,
+    saveBeneficiary: false,
+    paymentReference,
+  };
+
+  const resp = await safehavenRequest({
+    path: "/transfers",
+    method: "POST",
+    body: requestBody,
+  });
+  const tx = resp.data || {};
+  const status = String(tx.status || "PENDING").toUpperCase();
+  return {
+    id: tx._id || tx.id || paymentReference,
+    status,
+    reference: tx.paymentReference || paymentReference,
+    raw: tx,
+  };
 };
 
 const _resolveIntraDestination = async ({ toAccountId, toBankCode }) => {
@@ -12137,7 +12237,18 @@ exports.sudoCreateAccount = onCall({ secrets: [sudoApiKey] }, async (data) => {
 
 // Fund a Sudo account then create a card (runs server-side; updates Firestore + sends notification)
 exports.sudoFundAndCreateCard = onCall(
-  { secrets: [sudoApiKey, smtpHost, smtpUser, smtpPass], timeoutSeconds: 120 },
+  {
+    secrets: [
+      sudoApiKey,
+      smtpHost,
+      smtpUser,
+      smtpPass,
+      safehavenClientId,
+      safehavenPrivateKey,
+      safehavenCompanyUrl,
+    ],
+    timeoutSeconds: 120,
+  },
   async (data) => {
     await ensureVerifiedOrStandUser(data.auth);
     const flowId = `SFC-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
@@ -12153,6 +12264,10 @@ exports.sudoFundAndCreateCard = onCall(
       fundAmount,
       usdNgnRate,
       fundAmountNgnEquivalent,
+      cardFeeNgn,
+      cardFeeUsd,
+      cardFeeNgnEquivalent,
+      safehavenChargeAmountNgn,
       cardNumber,
       issuerCountry,
     } = data.data;
@@ -12170,6 +12285,9 @@ exports.sudoFundAndCreateCard = onCall(
       hasFundingSourceId: !!fundingSourceId,
       hasCardNumber: !!cardNumber,
       fundAmount,
+      cardFeeNgn,
+      cardFeeUsd,
+      safehavenChargeAmountNgn,
       issuerCountry,
     });
 
@@ -12190,8 +12308,13 @@ exports.sudoFundAndCreateCard = onCall(
     }
 
     const resolvedCurrency = (currency || "NGN").toUpperCase();
+    const minimumFundAmount = resolvedCurrency === "USD" ? 3 : 1;
     const resolvedFundAmount =
-      typeof fundAmount === "number" && fundAmount >= 1 ? fundAmount : 5000;
+      typeof fundAmount === "number" && fundAmount >= minimumFundAmount
+        ? fundAmount
+        : resolvedCurrency === "USD"
+          ? 3
+          : 5000;
     const apiKey = sudoApiKey.value() || SUDO_API_KEY_PLACEHOLDER;
     if (!apiKey)
       throw new HttpsError("internal", "Sudo API key is not configured.");
@@ -12272,6 +12395,14 @@ exports.sudoFundAndCreateCard = onCall(
         );
       }
     };
+
+    let safehavenCardCharge = null;
+    let safehavenCardChargeAmountKobo = 0;
+    let safehavenCardChargeLogRef = null;
+    let resolvedSafehavenChargeNgn = 0;
+    let resolvedCardFeeNgn = 0;
+    let resolvedCardFeeUsd = 0;
+    let resolvedCardFeeNgnEquivalent = null;
 
     try {
       // Resolve effective Sudo customer ID
@@ -12426,6 +12557,120 @@ exports.sudoFundAndCreateCard = onCall(
         resolvedFundAmountNgnEquivalent =
           toPositiveNumber(fundAmountNgnEquivalent) ||
           Number((resolvedFundAmount * resolvedUsdNgnRate).toFixed(2));
+      }
+
+      const normalizedCardType = (type || "virtual").toLowerCase();
+      const shouldChargeSafehaven = normalizedCardType !== "physical";
+      if (shouldChargeSafehaven) {
+        if (resolvedCurrency === "USD") {
+          resolvedCardFeeUsd = toPositiveNumber(cardFeeUsd) || 2;
+          resolvedCardFeeNgnEquivalent =
+            toPositiveNumber(cardFeeNgnEquivalent) ||
+            Number((resolvedCardFeeUsd * resolvedUsdNgnRate).toFixed(2));
+          resolvedSafehavenChargeNgn =
+            toPositiveNumber(safehavenChargeAmountNgn) ||
+            Number(
+              (
+                (resolvedFundAmountNgnEquivalent || 0) +
+                resolvedCardFeeNgnEquivalent
+              ).toFixed(2),
+            );
+        } else if (resolvedCurrency === "NGN") {
+          resolvedCardFeeNgn = toPositiveNumber(cardFeeNgn) || 500;
+          resolvedSafehavenChargeNgn =
+            toPositiveNumber(safehavenChargeAmountNgn) || resolvedCardFeeNgn;
+        }
+      }
+
+      if (shouldChargeSafehaven && resolvedSafehavenChargeNgn > 0) {
+        const userSafehavenAccount = await _getSafehavenAccountForUser(userId);
+        const companySafehavenAccount = await _getSafehavenCompanyMainAccount();
+        if (!userSafehavenAccount?.accountNumber) {
+          throw new Error(
+            "SafeHaven account not found. Please create a bank account first.",
+          );
+        }
+        if (!companySafehavenAccount?.accountNumber) {
+          throw new Error(
+            "Company SafeHaven account is not configured for card charges.",
+          );
+        }
+
+        safehavenCardChargeAmountKobo = Math.round(
+          resolvedSafehavenChargeNgn * 100,
+        );
+        const paymentReference = `sudo_card_charge_${flowId}`;
+        safehavenCardChargeLogRef = db
+          .collection("sudo_card_creation_charges")
+          .doc(flowId);
+
+        await safehavenCardChargeLogRef.set({
+          flowId,
+          userId,
+          cardDocId,
+          currency: resolvedCurrency,
+          type: normalizedCardType,
+          fundAmountUsd:
+            resolvedCurrency === "USD" ? resolvedFundAmount : null,
+          fundAmountNgnEquivalent:
+            resolvedCurrency === "USD"
+              ? resolvedFundAmountNgnEquivalent
+              : null,
+          cardFeeNgn: resolvedCardFeeNgn || null,
+          cardFeeUsd: resolvedCardFeeUsd || null,
+          cardFeeNgnEquivalent: resolvedCardFeeNgnEquivalent,
+          chargeAmountNgn: resolvedSafehavenChargeNgn,
+          chargeAmountKobo: safehavenCardChargeAmountKobo,
+          paymentReference,
+          status: "initiated",
+          provider: "safehaven",
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        safehavenCardCharge = await _safehavenBookTransferByAccountNumber({
+          uid: userId,
+          debitAccountNumber: userSafehavenAccount.accountNumber,
+          beneficiaryAccountNumber: companySafehavenAccount.accountNumber,
+          beneficiaryBankCode: companySafehavenAccount.bankCode || "999240",
+          amountKobo: safehavenCardChargeAmountKobo,
+          narration: `${resolvedCurrency} virtual card charge`,
+          paymentReference,
+        });
+
+        if (safehavenCardCharge.status === "FAILED") {
+          await safehavenCardChargeLogRef.set(
+            {
+              status: "failed",
+              safehavenStatus: safehavenCardCharge.status,
+              transferId: safehavenCardCharge.id,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            },
+            { merge: true },
+          );
+          throw new Error("SafeHaven card charge failed.");
+        }
+
+        const chargeData = {
+          provider: "safehaven",
+          status: "settled",
+          transferId: safehavenCardCharge.id,
+          reference: safehavenCardCharge.reference,
+          amountNgn: resolvedSafehavenChargeNgn,
+          amountKobo: safehavenCardChargeAmountKobo,
+          cardFeeNgn: resolvedCardFeeNgn || null,
+          cardFeeUsd: resolvedCardFeeUsd || null,
+          cardFeeNgnEquivalent: resolvedCardFeeNgnEquivalent,
+          chargedAt: admin.firestore.FieldValue.serverTimestamp(),
+        };
+        await safehavenCardChargeLogRef.set(
+          {
+            ...chargeData,
+            safehavenStatus: safehavenCardCharge.status,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true },
+        );
+        await cardRef.set({ safehavenCardCharge: chargeData }, { merge: true });
       }
 
       // Step 0: Auto-update customer with phone, email and identity details
@@ -13089,7 +13334,7 @@ exports.sudoFundAndCreateCard = onCall(
 
       // Step 4: Notify user and save to notifications collection
       await sendAndSaveNotification(
-        "Your card is ready! ??",
+        "Your card is ready!",
         `Your ${resolvedCurrency} virtual card has been created successfully.`,
         "card_created",
       );
@@ -13127,6 +13372,97 @@ exports.sudoFundAndCreateCard = onCall(
         error: err.message,
         stack: err.stack,
       });
+
+      if (
+        safehavenCardCharge &&
+        safehavenCardCharge.status !== "FAILED" &&
+        safehavenCardChargeAmountKobo > 0
+      ) {
+        try {
+          const userSafehavenAccount = await _getSafehavenAccountForUser(userId);
+          const companySafehavenAccount = await _getSafehavenCompanyMainAccount();
+          if (!userSafehavenAccount?.accountNumber) {
+            throw new Error("User SafeHaven account missing for card refund.");
+          }
+          if (!companySafehavenAccount?.accountNumber) {
+            throw new Error("Company SafeHaven account missing for card refund.");
+          }
+
+          const refundReference = `sudo_card_refund_${flowId}`;
+          const refundTransfer = await _safehavenBookTransferByAccountNumber({
+            uid: userId,
+            debitAccountNumber: companySafehavenAccount.accountNumber,
+            beneficiaryAccountNumber: userSafehavenAccount.accountNumber,
+            beneficiaryBankCode: userSafehavenAccount.bankCode || "999240",
+            amountKobo: safehavenCardChargeAmountKobo,
+            narration: `${resolvedCurrency} virtual card refund`,
+            paymentReference: refundReference,
+          });
+
+          const refundData = {
+            status: "refunded",
+            refundTransferId: refundTransfer.id,
+            refundReference: refundTransfer.reference,
+            refundStatus: refundTransfer.status,
+            refundedAt: admin.firestore.FieldValue.serverTimestamp(),
+          };
+          await safehavenCardChargeLogRef
+            ?.set(
+              {
+                ...refundData,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+              },
+              { merge: true },
+            )
+            .catch(() => {});
+          await cardRef
+            .set(
+              {
+                "safehavenCardCharge.status": refundData.status,
+                "safehavenCardCharge.refundTransferId":
+                  refundData.refundTransferId,
+                "safehavenCardCharge.refundReference":
+                  refundData.refundReference,
+                "safehavenCardCharge.refundStatus": refundData.refundStatus,
+                "safehavenCardCharge.refundedAt": refundData.refundedAt,
+              },
+              { merge: true },
+            )
+            .catch(() => {});
+        } catch (refundErr) {
+          console.error("[sudoFundAndCreateCard] SafeHaven refund failed", {
+            flowId,
+            userId,
+            cardDocId,
+            error: refundErr.message,
+          });
+          const refundFailure = {
+            status: "refund_failed",
+            refundError: refundErr.message || "unknown",
+            refundFailedAt: admin.firestore.FieldValue.serverTimestamp(),
+          };
+          await safehavenCardChargeLogRef
+            ?.set(
+              {
+                ...refundFailure,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+              },
+              { merge: true },
+            )
+            .catch(() => {});
+          await cardRef
+            .set(
+              {
+                "safehavenCardCharge.status": refundFailure.status,
+                "safehavenCardCharge.refundError": refundFailure.refundError,
+                "safehavenCardCharge.refundFailedAt":
+                  refundFailure.refundFailedAt,
+              },
+              { merge: true },
+            )
+            .catch(() => {});
+        }
+      }
 
       // If a physical card inventory PAN was assigned for this attempt,
       // release it back to inventory so it can be reused on future requests.
@@ -14366,7 +14702,9 @@ exports.sudoWebhook = onRequest(
   {
     secrets: [
       sudoWebhookSecret,
-      getanchorSecretKey,
+      safehavenClientId,
+      safehavenPrivateKey,
+      safehavenCompanyUrl,
       smtpHost,
       smtpUser,
       smtpPass,
@@ -14443,23 +14781,84 @@ exports.sudoWebhook = onRequest(
       await saveNotification(userId, { title, body, type });
     };
 
-    // Fetch user's live NGN balance from Anchor (in kobo).
-    const getAnchorBalanceKobo = async (userId) => {
+    const getSafehavenCompanyAccount = async () => {
+      const companySnap = await db.collection("company").doc("account_details").get();
+      const companyData = companySnap.exists ? companySnap.data() || {} : {};
+      if (companyData.accountId && companyData.accountNumber) {
+        return {
+          id: String(companyData.accountId || "").trim(),
+          accountNumber: String(companyData.accountNumber || "").trim(),
+          bankCode: String(companyData.bankId || "999240").trim() || "999240",
+        };
+      }
+
+      const accounts = await _safehavenListMainAccounts();
+      const account =
+        accounts.find((acc) => acc.isDefault && acc.accountNumber) ||
+        accounts.find((acc) => acc.accountNumber);
+      if (!account) return null;
+      return {
+        id: account.id,
+        accountNumber: account.accountNumber,
+        bankCode: "999240",
+      };
+    };
+
+    // Fetch user's live NGN balance from SafeHaven (in kobo).
+    const getSafehavenBalanceKobo = async (userId) => {
       try {
-        const userSnap = await db.collection("users").doc(userId).get();
-        const accountId =
-          userSnap.data()?.getAnchorData?.virtualAccount?.data?.id;
-        if (!accountId) return null;
-        const json = await makeApiRequest({
-          url: `${BASE_URL}/accounts/balance/${encodeURIComponent(accountId)}`,
+        const account = await _getSafehavenAccountForUser(userId);
+        if (!account?.accountId) return null;
+        const resp = await safehavenRequest({
+          path: `/accounts/${encodeURIComponent(account.accountId)}`,
           method: "GET",
-          secretKey: getanchorSecretKey.value(),
         });
-        return json?.data?.availableBalance ?? null;
+        const acct = resp.data || {};
+        return Math.round((acct.accountBalance ?? 0) * 100);
       } catch (e) {
-        console.warn("[sudoWebhook] getAnchorBalance error:", e.message);
+        console.warn("[sudoWebhook] getSafehavenBalance error:", e.message);
         return null;
       }
+    };
+
+    const safehavenBookTransfer = async ({
+      fromUid,
+      debitAccountNumber,
+      beneficiaryAccountNumber,
+      beneficiaryBankCode = "999240",
+      amountKobo,
+      narration,
+      paymentReference,
+    }) => {
+      const enquiry = await _safehavenNameEnquiry(
+        fromUid,
+        beneficiaryBankCode,
+        beneficiaryAccountNumber,
+      );
+      if (!enquiry?.nameEnquiryReference) {
+        throw new Error("SafeHaven name enquiry failed");
+      }
+      const resp = await safehavenRequest({
+        path: "/transfers",
+        method: "POST",
+        body: {
+          nameEnquiryReference: enquiry.nameEnquiryReference,
+          debitAccountNumber,
+          beneficiaryBankCode,
+          beneficiaryAccountNumber,
+          narration,
+          amount: amountKobo / 100,
+          saveBeneficiary: false,
+          paymentReference,
+        },
+      });
+      const tx = resp.data || {};
+      const status = String(tx.status || "PENDING").toUpperCase();
+      return {
+        id: tx._id || tx.id || paymentReference,
+        status,
+        raw: resp,
+      };
     };
 
     // Save raw event for debugging.
@@ -14768,87 +15167,70 @@ exports.sudoWebhook = onRequest(
           }
         }
 
-        let approve = true; // Default approve if Anchor balance check is unavailable
+        let approve = currency !== "NGN";
         let balanceConfirmed = false; // Only true when we got a real balance reading
         let prefundTransferId = null;
         let prefundLogKey = eventObject?._id || null;
         let authDeclineReason = "insufficient_funds";
 
         if (currency === "NGN") {
-          const balanceKobo = await getAnchorBalanceKobo(found.userId);
+          const balanceKobo = await getSafehavenBalanceKobo(found.userId);
           if (balanceKobo !== null) {
-            // Sudo sends amount in naira, Anchor balance is in kobo ? convert to compare
+            // Sudo sends amount in naira, SafeHaven balance is normalized to kobo.
             approve = balanceKobo >= pendingAmount * 100;
             balanceConfirmed = true;
+          } else {
+            approve = false;
+            authDeclineReason = "balance_unavailable";
           }
         }
-        // USD cards: Sudo settlement account covers it ? no prefund needed.
+        // USD cards: Sudo settlement account covers it; no SafeHaven prefund needed.
 
-        // -- Prefund: transfer user ? company before approving ----------
+        // -- Prefund: transfer user -> company before approving ----------
         // Only when we confirmed the user has sufficient balance (not just defaulting approve).
         if (approve && balanceConfirmed && currency === "NGN") {
           const amountKobo = Math.round(pendingAmount * 100);
           if (!prefundLogKey) prefundLogKey = `${sudoCardId}_${Date.now()}`;
           try {
-            const userSnap = await db
-              .collection("users")
-              .doc(found.userId)
-              .get();
-            const userVaData =
-              userSnap.data()?.getAnchorData?.virtualAccount?.data;
-            const companySnap = await db
-              .collection("company")
-              .doc("account_details")
-              .get();
-            if (
-              !userVaData?.id ||
-              !companySnap.exists ||
-              !companySnap.data()?.accountId
-            ) {
+            const userAccount = await _getSafehavenAccountForUser(found.userId);
+            const companyAccount = await getSafehavenCompanyAccount();
+            if (!userAccount?.accountNumber || !companyAccount?.accountNumber) {
               throw new Error(
-                "Missing user or company account details for prefund",
+                "Missing SafeHaven user or company account details for prefund",
               );
             }
             const prefundIdempotencyKey = `sudo_prefund_${prefundLogKey}`;
-            const prefundResult = await makeApiRequest({
-              url: `${BASE_URL}/transfers`,
-              method: "POST",
-              secretKey: getanchorSecretKey.value(),
-              body: {
-                data: {
-                  attributes: {
-                    account: { id: userVaData.id },
-                    destinationAccount: { id: companySnap.data().accountId },
-                    amount: amountKobo,
-                    currency: "NGN",
-                    narration: `Card prefund ${sudoCardId}`,
-                  },
-                  type: "Transfer",
-                },
-              },
-              idempotencyKey: prefundIdempotencyKey,
+            const prefundResult = await safehavenBookTransfer({
+              fromUid: found.userId,
+              debitAccountNumber: userAccount.accountNumber,
+              beneficiaryAccountNumber: companyAccount.accountNumber,
+              beneficiaryBankCode: "999240",
+              amountKobo,
+              narration: `Card prefund ${sudoCardId}`,
+              paymentReference: prefundIdempotencyKey,
             });
-            const prefundStatus = prefundResult?.data?.attributes?.status;
-            prefundTransferId = prefundResult?.data?.id ?? null;
+            const prefundStatus = prefundResult.status;
+            prefundTransferId = prefundResult.id ?? null;
             if (prefundStatus === "FAILED") {
-              throw new Error(
-                prefundResult?.data?.attributes?.failureReason ||
-                  "Prefund transfer returned FAILED",
-              );
+              throw new Error("SafeHaven prefund transfer returned FAILED");
             }
-            // Log prefund ? internal only, not shown in user UI
+            // Log prefund internally only; not shown in user UI.
             await db.collection("sudo_card_prefunds").doc(prefundLogKey).set({
               userId: found.userId,
               cardId: sudoCardId,
               amountKobo,
               currency: "NGN",
+              provider: "safehaven",
+              fromAccountNumber: userAccount.accountNumber,
+              toAccountNumber: companyAccount.accountNumber,
               transferId: prefundTransferId,
               idempotencyKey: prefundIdempotencyKey,
               status: "prefunded",
+              apiResponse: prefundResult.raw,
               createdAt: admin.firestore.FieldValue.serverTimestamp(),
             });
             console.log(
-              `[sudoWebhook] Prefund user?company OK ? transferId:${prefundTransferId} amountKobo:${amountKobo}`,
+              `[sudoWebhook] SafeHaven prefund user->company OK transferId:${prefundTransferId} amountKobo:${amountKobo}`,
             );
           } catch (prefundErr) {
             approve = false;
@@ -14865,6 +15247,7 @@ exports.sudoWebhook = onRequest(
                 cardId: sudoCardId,
                 amountKobo,
                 currency: "NGN",
+                provider: "safehaven",
                 status: "prefund_failed",
                 error: prefundErr.message,
                 createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -14904,7 +15287,7 @@ exports.sudoWebhook = onRequest(
         );
 
         // If a prefund was completed but something goes wrong before we can confirm
-        // the approval to Sudo, reverse the transfer (company ? user).
+        // the approval to Sudo, reverse the transfer (company -> user).
         if (approve && prefundTransferId) {
           try {
             return res.status(200).json(respBody);
@@ -14914,43 +15297,22 @@ exports.sudoWebhook = onRequest(
               sendErr.message,
             );
             try {
-              const userSnap = await db
-                .collection("users")
-                .doc(found.userId)
-                .get();
-              const userVaData =
-                userSnap.data()?.getAnchorData?.virtualAccount?.data;
-              const companySnap = await db
-                .collection("company")
-                .doc("account_details")
-                .get();
-              if (
-                userVaData?.id &&
-                companySnap.exists &&
-                companySnap.data()?.accountId
-              ) {
+              const userAccount = await _getSafehavenAccountForUser(found.userId);
+              const companyAccount = await getSafehavenCompanyAccount();
+              if (userAccount?.accountNumber && companyAccount?.accountNumber) {
                 const reversalKey = `sudo_prefund_reversal_${prefundLogKey}`;
-                const reversalResult = await makeApiRequest({
-                  url: `${BASE_URL}/transfers`,
-                  method: "POST",
-                  secretKey: getanchorSecretKey.value(),
-                  body: {
-                    data: {
-                      attributes: {
-                        account: { id: companySnap.data().accountId },
-                        destinationAccount: { id: userVaData.id },
-                        amount: Math.round(pendingAmount * 100),
-                        currency: "NGN",
-                        narration: `Card prefund reversal ${sudoCardId}`,
-                      },
-                      type: "Transfer",
-                    },
-                  },
-                  idempotencyKey: reversalKey,
+                const reversalResult = await safehavenBookTransfer({
+                  fromUid: found.userId,
+                  debitAccountNumber: companyAccount.accountNumber,
+                  beneficiaryAccountNumber: userAccount.accountNumber,
+                  beneficiaryBankCode: userAccount.bankCode || "999240",
+                  amountKobo: Math.round(pendingAmount * 100),
+                  narration: `Card prefund reversal ${sudoCardId}`,
+                  paymentReference: reversalKey,
                 });
-                const reversalTransferId = reversalResult?.data?.id ?? null;
+                const reversalTransferId = reversalResult.id ?? null;
                 console.log(
-                  `[sudoWebhook] Reversal company?user OK ? transferId:${reversalTransferId}`,
+                  `[sudoWebhook] SafeHaven reversal company->user OK transferId:${reversalTransferId}`,
                 );
                 await db
                   .collection("sudo_card_prefunds")
@@ -14959,6 +15321,7 @@ exports.sudoWebhook = onRequest(
                     status: "reversed",
                     reversalTransferId,
                     reversalIdempotencyKey: reversalKey,
+                    reversalApiResponse: reversalResult.raw,
                     reversalAt: admin.firestore.FieldValue.serverTimestamp(),
                   })
                   .catch(() => {});
@@ -14994,7 +15357,7 @@ exports.sudoWebhook = onRequest(
         let balance = 0;
         const found = await findUserByCardId(sudoCardId);
         if (found && currency === "NGN") {
-          const b = await getAnchorBalanceKobo(found.userId);
+          const b = await getSafehavenBalanceKobo(found.userId);
           if (b !== null) balance = b;
         }
         return res
