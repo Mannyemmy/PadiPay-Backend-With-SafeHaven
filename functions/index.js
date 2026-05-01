@@ -4959,353 +4959,278 @@ safehavenApp.post("/", async (req, res) => {
           }
         }
 
-        // ==================== ACCOUNT.CREDIT EVENT ====================
-        if (evtType && evtType.toString().toLowerCase() === "account.credit") {
-          const payload = parsed.data || parsed;
+     // ==================== ACCOUNT.CREDIT EVENT ====================
+if (evtType && evtType.toString().toLowerCase() === "account.credit") {
+  const payload = parsed.data || parsed;
 
-          console.log(
-            "[SafeHaven webhook] account.credit - full payload:",
-            JSON.stringify(payload, null, 2),
-          );
+  console.log("[SafeHaven webhook] account.credit - full payload:", JSON.stringify(payload, null, 2));
 
-          const creditAccountNumber = String(
-            payload.creditAccountNumber ||
-              payload.creditAccount ||
-              payload.accountNumber ||
-              payload.realCreditAccountNumber ||
-              payload.beneficiaryAccountNumber ||
-              "",
-          ).trim();
-          const amountRaw = Number(payload.amount || 0);
-          const amountDisplay = Number.isFinite(amountRaw)
-            ? amountRaw.toLocaleString("en-NG")
-            : String(payload.amount || "0");
-          const senderName = String(
-            payload.debitAccountName ||
-              payload.senderName ||
-              payload.originatorAccountName ||
-              payload.creditAccountName ||
-              "A bank transfer",
-          ).trim();
-          const paymentReference = String(
-            payload.paymentReference ||
-              payload.sessionId ||
-              payload.reference ||
-              "",
-          ).trim();
-          const sessionId = String(payload.sessionId || "").trim();
+  // ---- Step 1: Extract sessionId ONLY for verification ----
+  const sessionId = String(payload.sessionId || "").trim();
+  if (!sessionId) {
+    console.warn("[SafeHaven webhook] No sessionId – cannot verify. Saving for review.");
+    await db.collection("pendingCreditReviews").add({
+      type: "credit_webhook",
+      receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+      rawPayload: payload,
+      status: "PENDING_REVIEW",
+      reason: "Missing sessionId",
+    });
+    return; // STOP HERE
+  }
 
-          // Sender details (for admin review)
-          const senderAccountNumber = String(
-            payload.debitAccountNumber || "",
-          ).trim();
-          const senderBankCode = String(
-            payload.debitBankCode ||
-              payload.originatorBankCode ||
-              payload.senderBankCode ||
-              "",
-          ).trim();
+  // ---- Step 2: Verify the transfer using sessionId ONLY ----
+  let transferVerified = false;
+  let verificationDetails = null;
+  try {
+    const verifyResp = await safehavenRequest({
+      path: "/transfers/status",
+      method: "POST",
+      body: { sessionId },
+    });
+    verificationDetails = verifyResp.data || verifyResp;
+    const status = String(verificationDetails?.status || "").toUpperCase();
+    transferVerified = (status === "SUCCESSFUL" || status === "COMPLETED");
+    console.log(`[SafeHaven webhook] Transfer status (sessionId): ${status} -> verified=${transferVerified}`);
+  } catch (verifyErr) {
+    console.error("[SafeHaven webhook] Transfer verification failed:", verifyErr.message);
+    transferVerified = false;
+  }
 
-          console.log("[SafeHaven webhook] account.credit - extracted:", {
-            creditAccountNumber,
-            amountRaw,
-            senderName,
-            paymentReference,
-            sessionId,
-            senderAccountNumber,
-            senderBankCode,
-          });
+  // ---- Step 3: If not verified, log and STOP ----
+  if (!transferVerified) {
+    console.log(`[SafeHaven webhook] Transfer NOT verified – saving to pendingCreditReviews`);
+    await db.collection("pendingCreditReviews").add({
+      type: "credit_webhook",
+      receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+      sessionId,
+      verificationDetails,
+      rawPayload: payload,
+      status: "PENDING_REVIEW",
+      reason: "Transfer not verified by SafeHaven",
+    });
+    return; // >>>>> NO FURTHER PROCESSING <<<<<
+  }
 
-          if (!creditAccountNumber) {
-            console.log(
-              "[SafeHaven webhook] account.credit ignored: missing creditAccountNumber",
-            );
-            return;
-          }
+  // ---- Step 4: Now extract other fields (trusted because verification passed) ----
+  const creditAccountNumber = String(
+    payload.creditAccountNumber ||
+      payload.creditAccount ||
+      payload.accountNumber ||
+      payload.realCreditAccountNumber ||
+      payload.beneficiaryAccountNumber ||
+      ""
+  ).trim();
+  const amountRaw = Number(payload.amount || 0);
+  const amountDisplay = Number.isFinite(amountRaw) ? amountRaw.toLocaleString("en-NG") : String(payload.amount || "0");
+  const senderName = String(
+    payload.debitAccountName ||
+      payload.senderName ||
+      payload.originatorAccountName ||
+      payload.creditAccountName ||
+      "A bank transfer"
+  ).trim();
+  const senderAccountNumber = String(payload.debitAccountNumber || "").trim();
+  const senderBankCode = String(
+    payload.debitBankCode ||
+      payload.originatorBankCode ||
+      payload.senderBankCode ||
+      ""
+  ).trim();
 
-          // ---------- 1. Verify transfer status with SafeHaven API ----------
-          let transferVerified = false;
-          let verificationDetails = null;
-          if (paymentReference || sessionId) {
-            try {
-              const verifyBody = {};
-              if (paymentReference)
-                verifyBody.paymentReference = paymentReference;
-              if (sessionId) verifyBody.sessionId = sessionId;
+  console.log("[SafeHaven webhook] account.credit - extracted after verification:", {
+    creditAccountNumber,
+    amountRaw,
+    senderName,
+    sessionId,
+    senderAccountNumber,
+    senderBankCode,
+  });
 
-              const verifyResp = await safehavenRequest({
-                path: "/transfers/status",
-                method: "POST",
-                body: verifyBody,
-              });
-              verificationDetails = verifyResp.data || verifyResp;
-              const status = String(
-                verificationDetails?.status || "",
-              ).toUpperCase();
-              transferVerified =
-                status === "SUCCESSFUL" || status === "COMPLETED";
-              console.log(
-                `[SafeHaven webhook] Transfer status check: ${status} -> verified=${transferVerified}`,
-              );
-            } catch (verifyErr) {
-              console.error(
-                "[SafeHaven webhook] Failed to verify transfer status:",
-                verifyErr.message,
-              );
-              // Do not trust the webhook; treat as unverified
-              transferVerified = false;
-            }
-          } else {
-            console.warn(
-              "[SafeHaven webhook] No paymentReference or sessionId – cannot verify transfer",
-            );
-          }
+  if (!creditAccountNumber) {
+    console.log("[SafeHaven webhook] account.credit ignored: missing creditAccountNumber");
+    return;
+  }
 
-          // ---------- 2. Find the user who owns the receiving account ----------
-          let resolvedUid = null;
-          try {
-            const queries = [
-              db
-                .collection("users")
-                .where(
-                  "safehavenData.virtualAccount.data.attributes.accountNumber",
-                  "==",
-                  creditAccountNumber,
-                ),
-              db
-                .collection("users")
-                .where("safehavenAccountNumber", "==", creditAccountNumber),
-              db
-                .collection("safehavenUserSetup")
-                .where("safehavenAccountNumber", "==", creditAccountNumber),
-            ];
-            for (const query of queries) {
-              const snap = await query.limit(1).get();
-              if (!snap.empty) {
-                resolvedUid = snap.docs[0].id;
-                console.log(
-                  `[SafeHaven webhook] Found user ${resolvedUid} for account ${creditAccountNumber}`,
-                );
-                break;
-              }
-            }
-          } catch (lookupErr) {
-            console.error("[SafeHaven webhook] User lookup error:", lookupErr);
-          }
+  // ---- Step 5: Find the user who owns the receiving account ----
+  let resolvedUid = null;
+  try {
+    const queries = [
+      db.collection("users").where("safehavenData.virtualAccount.data.attributes.accountNumber", "==", creditAccountNumber),
+      db.collection("users").where("safehavenAccountNumber", "==", creditAccountNumber),
+      db.collection("safehavenUserSetup").where("safehavenAccountNumber", "==", creditAccountNumber),
+    ];
+    for (const query of queries) {
+      const snap = await query.limit(1).get();
+      if (!snap.empty) {
+        resolvedUid = snap.docs[0].id;
+        console.log(`[SafeHaven webhook] Found user ${resolvedUid} for account ${creditAccountNumber}`);
+        break;
+      }
+    }
+  } catch (lookupErr) {
+    console.error("[SafeHaven webhook] User lookup error:", lookupErr);
+  }
 
-          // ---------- 3. If not verified or user not found → save for admin review ----------
-          if (!transferVerified || !resolvedUid) {
-            const reviewDoc = {
-              type: "credit_webhook",
-              receivedAt: admin.firestore.FieldValue.serverTimestamp(),
-              transferVerified,
-              userFound: !!resolvedUid,
-              userId: resolvedUid || null,
-              creditAccountNumber,
-              amount: amountRaw,
-              senderName,
-              paymentReference,
-              sessionId,
-              senderAccountNumber,
-              senderBankCode,
-              rawPayload: payload,
-              verificationDetails,
-              status: "PENDING_REVIEW",
-            };
-            await db.collection("pendingCreditReviews").add(reviewDoc);
-            console.log(
-              `[SafeHaven webhook] Saved to pendingCreditReviews (transferVerified=${transferVerified}, userFound=${!!resolvedUid})`,
-            );
-            return; // Stop processing – no automatic deposit or notification
-          }
+  if (!resolvedUid) {
+    console.log(`[SafeHaven webhook] User not found for account ${creditAccountNumber} – saving for review`);
+    await db.collection("pendingCreditReviews").add({
+      type: "credit_webhook",
+      receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+      sessionId,
+      creditAccountNumber,
+      amount: amountRaw,
+      senderName,
+      senderAccountNumber,
+      senderBankCode,
+      rawPayload: payload,
+      status: "PENDING_REVIEW",
+      reason: "User account not found",
+    });
+    return;
+  }
 
-          // ---------- 4. User found & transfer verified → proceed with tier limit checks ----------
-          let limitsCheckPassed = true;
-          let rejectionReason = null;
-          let userTier = null;
-          try {
-            const userSnap = await db
-              .collection("users")
-              .doc(resolvedUid)
-              .get();
-            const userData = userSnap.data() || {};
-            userTier = userData.safehavenData?.tier?.toString();
+  // ---- Step 6: Tier limit checks (only after verification succeeded and user found) ----
+  let limitsCheckPassed = true;
+  let rejectionReason = null;
+  let userTier = null;
+  try {
+    const userSnap = await db.collection("users").doc(resolvedUid).get();
+    const userData = userSnap.data() || {};
+    userTier = userData.safehavenData?.tier?.toString();
 
-            if (userTier && ["1", "2", "3"].includes(userTier)) {
-              const tierDoc = await db
-                .collection("tiers")
-                .doc(`tier${userTier}`)
-                .get();
-              if (tierDoc.exists) {
-                const limits = tierDoc.data();
-                const transactionAmountNaira = amountRaw;
+    if (userTier && ["1", "2", "3"].includes(userTier)) {
+      const tierDoc = await db.collection("tiers").doc(`tier${userTier}`).get();
+      if (tierDoc.exists) {
+        const limits = tierDoc.data();
+        const transactionAmountNaira = amountRaw;
 
-                // a) Per‑transaction limit
-                if (transactionAmountNaira > limits.limitPerTransaction) {
-                  limitsCheckPassed = false;
-                  rejectionReason = `Per‑transaction limit exceeded: ₦${transactionAmountNaira.toFixed(2)} > ₦${limits.limitPerTransaction.toFixed(2)}`;
-                }
+        // a) Per‑transaction limit
+        if (transactionAmountNaira > limits.limitPerTransaction) {
+          limitsCheckPassed = false;
+          rejectionReason = `Per‑transaction limit exceeded: ₦${transactionAmountNaira.toFixed(2)} > ₦${limits.limitPerTransaction.toFixed(2)}`;
+        }
 
-                // b) Daily received sum limit
-                if (limitsCheckPassed) {
-                  const todayStart = new Date();
-                  todayStart.setHours(0, 0, 0, 0);
-                  const todayEnd = new Date();
-                  todayEnd.setHours(23, 59, 59, 999);
-                  const dailyTxns = await db
-                    .collection("transactions")
-                    .where("userId", "==", resolvedUid)
-                    .where("type", "==", "deposit")
-                    .where(
-                      "timestamp",
-                      ">=",
-                      admin.firestore.Timestamp.fromDate(todayStart),
-                    )
-                    .where(
-                      "timestamp",
-                      "<=",
-                      admin.firestore.Timestamp.fromDate(todayEnd),
-                    )
-                    .get();
-                  let dailyReceived = 0;
-                  for (const doc of dailyTxns.docs)
-                    dailyReceived += doc.data().amount || 0;
-                  const newDailyTotal = dailyReceived + transactionAmountNaira;
-                  if (newDailyTotal > limits.dailyLimit) {
-                    limitsCheckPassed = false;
-                    rejectionReason = `Daily limit exceeded: total today would be ₦${newDailyTotal.toFixed(2)} > ₦${limits.dailyLimit.toFixed(2)}`;
-                  }
-                }
-
-                // c) Max account balance limit
-                if (limitsCheckPassed) {
-                  const accountInfo =
-                    await _getSafehavenAccountForUser(resolvedUid);
-                  if (accountInfo?.accountId) {
-                    const balanceResp = await safehavenRequest({
-                      path: `/accounts/${encodeURIComponent(accountInfo.accountId)}`,
-                      method: "GET",
-                    });
-                    const currentBalanceKobo = Math.round(
-                      (balanceResp.data?.accountBalance ?? 0) * 100,
-                    );
-                    const currentBalanceNaira = currentBalanceKobo / 100;
-                    const newBalance =
-                      currentBalanceNaira + transactionAmountNaira;
-                    if (newBalance > limits.maxAccountBalance) {
-                      limitsCheckPassed = false;
-                      rejectionReason = `Max account balance exceeded: would be ₦${newBalance.toFixed(2)} > ₦${limits.maxAccountBalance.toFixed(2)}`;
-                    }
-                  }
-                }
-              } else {
-                console.warn(
-                  `[Limit] Tier limits not found for tier ${userTier}`,
-                );
-              }
-            } else {
-              console.log(
-                `[Limit] User ${resolvedUid} has no valid tier (${userTier}) – skipping limits`,
-              );
-            }
-          } catch (limitErr) {
-            console.error(
-              "[SafeHaven webhook] Error during limit checks:",
-              limitErr,
-            );
+        // b) Daily received sum limit
+        if (limitsCheckPassed) {
+          const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+          const todayEnd = new Date(); todayEnd.setHours(23,59,59,999);
+          const dailyTxns = await db.collection("transactions")
+            .where("userId", "==", resolvedUid)
+            .where("type", "==", "deposit")
+            .where("timestamp", ">=", admin.firestore.Timestamp.fromDate(todayStart))
+            .where("timestamp", "<=", admin.firestore.Timestamp.fromDate(todayEnd))
+            .get();
+          let dailyReceived = 0;
+          for (const doc of dailyTxns.docs) dailyReceived += doc.data().amount || 0;
+          const newDailyTotal = dailyReceived + transactionAmountNaira;
+          if (newDailyTotal > limits.dailyLimit) {
             limitsCheckPassed = false;
-            rejectionReason =
-              "Internal error during limit check – admin review required";
+            rejectionReason = `Daily limit exceeded: total today would be ₦${newDailyTotal.toFixed(2)} > ₦${limits.dailyLimit.toFixed(2)}`;
           }
+        }
 
-          // ---------- 5. If limits violated → store for admin review (no reversal) ----------
-          if (!limitsCheckPassed) {
-            const reviewDoc = {
-              type: "credit_limit_violation",
-              receivedAt: admin.firestore.FieldValue.serverTimestamp(),
-              userId: resolvedUid,
-              userTier,
-              amount: amountRaw,
-              senderName,
-              paymentReference,
-              sessionId,
-              creditAccountNumber,
-              senderAccountNumber,
-              senderBankCode,
-              violationReason: rejectionReason,
-              rawPayload: payload,
-              status: "PENDING_REVIEW",
-              recommendedAction: "MANUAL_CREDIT_REVIEW",
-            };
-            await db.collection("pendingCreditReviews").add(reviewDoc);
-            console.log(
-              `[SafeHaven webhook] Limit violation – saved to pendingCreditReviews: ${rejectionReason}`,
-            );
-            return; // No automatic deposit, no reversal
-          }
-
-          // ---------- 6. All checks passed → normal credit processing ----------
-          const userData =
-            (await db.collection("users").doc(resolvedUid).get()).data() || {};
-          const deviceToken = userData.deviceToken || null;
-          const userEmail = userData.email || null;
-
-          console.log(
-            `[SafeHaven webhook] Limits passed – creating deposit for user ${resolvedUid}`,
-          );
-
-          // Save deposit transaction
-          await db.collection("transactions").add({
-            userId: resolvedUid,
-            type: "deposit",
-            amount: amountRaw,
-            reference: paymentReference,
-            status: "SUCCESSFUL",
-            senderName,
-            timestamp: admin.firestore.FieldValue.serverTimestamp(),
-          });
-
-          // Auto‑match pending storefront orders
-          await tryMatchAndSettleStorefrontOrder({
-            merchantUid: resolvedUid,
-            payment: payload,
-          });
-
-          // Send notifications
-          if (deviceToken) {
-            try {
-              await admin.messaging().send({
-                token: deviceToken,
-                notification: {
-                  title: "Payment Received",
-                  body: `You received ₦${amountDisplay} from ${senderName}`,
-                },
-                ...FCM_CHANNEL,
-              });
-            } catch (msgErr) {
-              console.error("FCM error:", msgErr);
-            }
-          }
-          await saveNotification(resolvedUid, {
-            title: "Payment Received",
-            body: `You received ₦${amountDisplay} from ${senderName}`,
-            type: "payment_received",
-            amount: amountRaw,
-          });
-          if (userEmail) {
-            try {
-              await sendNotifyEmail({
-                to: userEmail,
-                subject: "Credit Received – PadiPay",
-                html: `<p>You received ₦${amountDisplay} from ${senderName}.</p>`,
-                text: `You received ₦${amountDisplay} from ${senderName}.`,
-              });
-            } catch (emailErr) {
-              console.error("Email error:", emailErr);
+        // c) Max account balance limit
+        if (limitsCheckPassed) {
+          const accountInfo = await _getSafehavenAccountForUser(resolvedUid);
+          if (accountInfo?.accountId) {
+            const balanceResp = await safehavenRequest({
+              path: `/accounts/${encodeURIComponent(accountInfo.accountId)}`,
+              method: "GET",
+            });
+            const currentBalanceKobo = Math.round((balanceResp.data?.accountBalance ?? 0) * 100);
+            const currentBalanceNaira = currentBalanceKobo / 100;
+            const newBalance = currentBalanceNaira + transactionAmountNaira;
+            if (newBalance > limits.maxAccountBalance) {
+              limitsCheckPassed = false;
+              rejectionReason = `Max account balance exceeded: would be ₦${newBalance.toFixed(2)} > ₦${limits.maxAccountBalance.toFixed(2)}`;
             }
           }
         }
-        // ==================== END ACCOUNT.CREDIT EVENT ====================
+      } else {
+        console.warn(`[Limit] Tier limits not found for tier ${userTier}`);
+      }
+    } else {
+      console.log(`[Limit] User ${resolvedUid} has no valid tier (${userTier}) – skipping limits`);
+    }
+  } catch (limitErr) {
+    console.error("[SafeHaven webhook] Error during limit checks:", limitErr);
+    limitsCheckPassed = false;
+    rejectionReason = "Internal error during limit check – admin review required";
+  }
+
+  // ---- Step 7: If limits violated → store for admin review (no deposit) ----
+  if (!limitsCheckPassed) {
+    const reviewDoc = {
+      type: "credit_limit_violation",
+      receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+      userId: resolvedUid,
+      userTier,
+      amount: amountRaw,
+      senderName,
+      sessionId,
+      creditAccountNumber,
+      senderAccountNumber,
+      senderBankCode,
+      violationReason: rejectionReason,
+      rawPayload: payload,
+      status: "PENDING_REVIEW",
+      recommendedAction: "MANUAL_CREDIT_REVIEW",
+    };
+    await db.collection("pendingCreditReviews").add(reviewDoc);
+    console.log(`[SafeHaven webhook] Limit violation – saved to pendingCreditReviews: ${rejectionReason}`);
+    return; // No automatic deposit
+  }
+
+  // ---- Step 8: All checks passed → normal credit processing ----
+  const userData = (await db.collection("users").doc(resolvedUid).get()).data() || {};
+  const deviceToken = userData.deviceToken || null;
+  const userEmail = userData.email || null;
+
+  console.log(`[SafeHaven webhook] Limits passed – creating deposit for user ${resolvedUid}`);
+
+  // Save deposit transaction
+  await db.collection("transactions").add({
+    userId: resolvedUid,
+    type: "deposit",
+    amount: amountRaw,
+    reference: sessionId,
+    status: "SUCCESSFUL",
+    senderName,
+    timestamp: admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  // Auto‑match pending storefront orders
+  await tryMatchAndSettleStorefrontOrder({ merchantUid: resolvedUid, payment: payload });
+
+  // Send push notification
+  if (deviceToken) {
+    try {
+      await admin.messaging().send({
+        token: deviceToken,
+        notification: { title: "Payment Received", body: `You received ₦${amountDisplay} from ${senderName}` },
+        ...FCM_CHANNEL,
+      });
+    } catch (msgErr) { console.error("FCM error:", msgErr); }
+  }
+  await saveNotification(resolvedUid, {
+    title: "Payment Received",
+    body: `You received ₦${amountDisplay} from ${senderName}`,
+    type: "payment_received",
+    amount: amountRaw,
+  });
+  if (userEmail) {
+    try {
+      await sendNotifyEmail({
+        to: userEmail,
+        subject: "Credit Received – PadiPay",
+        html: `<p>You received ₦${amountDisplay} from ${senderName}.</p>`,
+        text: `You received ₦${amountDisplay} from ${senderName}.`,
+      });
+    } catch (emailErr) { console.error("Email error:", emailErr); }
+  }
+}
+// ==================== END ACCOUNT.CREDIT EVENT ==================== 
       } catch (postErr) {
         console.error("SafeHaven webhook post-processing error:", postErr);
       }
