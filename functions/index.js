@@ -30,6 +30,7 @@ const bridgecardBaseUrl =
 const getanchorSecretKey = defineSecret("GETANCHOR_SECRET_KEY");
 const qoreIdApiKey = defineSecret("QOREID_API_KEY");
 const qoreIdClientId = defineSecret("QOREID_CLIENT_ID");
+const safehavenWebhookToken = defineSecret("SAFEHAVEN_WEBHOOK_TOKEN");
 // Safe Haven MFB ? OAuth2 client-credentials secrets
 const safehavenClientId = defineSecret("SAFEHAVEN_CLIENT_ID");
 const safehavenPrivateKey = defineSecret("SAFEHAVEN_PRIVATE_KEY"); // RS256 PEM private key
@@ -102,7 +103,21 @@ safehavenApp.use(
 );
 
 // Export SafeHaven webhook as a separate Cloud Function
-exports.safehavenWebhook = onRequest(safehavenApp);
+exports.safehavenWebhook = onRequest(
+  {
+    secrets: [
+      safehavenClientId,
+      safehavenPrivateKey,
+      safehavenCompanyUrl,
+      safehavenDebitAccountNumber,
+      smtpHost,
+      smtpUser,
+      smtpPass,
+      safehavenWebhookToken, // <-- add this secret (define it first)
+    ],
+  },
+  safehavenApp,
+);
 
 const sendViaSMTP = async ({ to, subject, html, text, replyTo }) => {
   const host = smtpHost.value();
@@ -4811,17 +4826,15 @@ safehavenApp.post("/", async (req, res) => {
       verificationMode: "disabled",
     });
 
-    // Post-process some SafeHaven webhook events (non-blocking best-effort)
+    // Post-process events (non-blocking best-effort)
     (async () => {
       try {
         const evtType =
-          parsed && (parsed.type || parsed.eventType)
-            ? parsed.type || parsed.eventType
+          parsed && (parsed.eventType || parsed.type)
+            ? parsed.eventType || parsed.type
             : null;
 
-        // identityCreditCheck is emitted when SafeHaven performs the small debit
-        // used to verify identity during BVN flows. We notify the user by device
-        // token and email when this occurs so the client can react.
+        // identityCreditCheck handling (unchanged)
         if (
           evtType &&
           evtType.toString().toLowerCase() === "identitycreditcheck"
@@ -4840,9 +4853,6 @@ safehavenApp.post("/", async (req, res) => {
             payload.debitMessage || payload.message || payload.reason || "",
           ).trim();
 
-          // Tie the event to the user who initiated identity verification.
-          // safehavenUserSetup is keyed by Firebase UID and stores identityId
-          // from safehavenInitiateIdentityVerification â€” this is the authoritative link.
           const identityCheckId = String(
             payload._id || payload.id || "",
           ).trim();
@@ -4856,8 +4866,7 @@ safehavenApp.post("/", async (req, res) => {
                 .limit(1)
                 .get();
               if (!setupQuery.empty) {
-                resolvedUid = setupQuery.docs[0].id; // doc ID is the Firebase UID
-                // Persist status so safehavenCreateSubAccount can skip a FAILED identityId
+                resolvedUid = setupQuery.docs[0].id;
                 await setupQuery.docs[0].ref.set(
                   {
                     identityCheckStatus: status,
@@ -4902,21 +4911,14 @@ safehavenApp.post("/", async (req, res) => {
                   ? `Identity verification debit failed: ${debitMsg} (code: ${payload.debitResponsCode || ""})`
                   : `Identity verification debit ${status.toLowerCase()}.`;
 
-              // Send push notification (best-effort)
               if (deviceToken) {
                 try {
-                  // await admin.messaging().send({
-                  //   token: deviceToken,
-                  //   notification: { title, body: bodyMsg },
-                  //   ...FCM_CHANNEL,
-                  // });
-                  // console.log(`SafeHaven webhook: pushed notification to ${resolvedUid}`);
+                  // optional push notification
                 } catch (msgErr) {
                   console.error("SafeHaven webhook push error:", msgErr);
                 }
               }
 
-              // Persist notification to user's notification feed
               try {
                 await saveNotification(resolvedUid, {
                   title,
@@ -4931,7 +4933,6 @@ safehavenApp.post("/", async (req, res) => {
                 );
               }
 
-              // Send email notification (best-effort)
               if (userEmail) {
                 try {
                   await sendNotifyEmail({
@@ -4958,24 +4959,15 @@ safehavenApp.post("/", async (req, res) => {
           }
         }
 
-        // account.credit is emitted when a user's virtual account receives funds.
-        // Notify the user via push + in-app notification + email.
-        // account.credit is emitted when a user's virtual account receives funds.
-        // Notify the user via push + in-app notification + email.
+        // ==================== ACCOUNT.CREDIT EVENT ====================
         if (evtType && evtType.toString().toLowerCase() === "account.credit") {
           const payload = parsed.data || parsed;
 
-          // Add detailed logging for debugging
           console.log(
-            "[SafeHaven webhook] account.credit - full payload keys:",
-            Object.keys(payload),
-          );
-          console.log(
-            "[SafeHaven webhook] account.credit - payload:",
+            "[SafeHaven webhook] account.credit - full payload:",
             JSON.stringify(payload, null, 2),
           );
 
-          // Try multiple possible field names for credit account number
           const creditAccountNumber = String(
             payload.creditAccountNumber ||
               payload.creditAccount ||
@@ -4984,13 +4976,10 @@ safehavenApp.post("/", async (req, res) => {
               payload.beneficiaryAccountNumber ||
               "",
           ).trim();
-
           const amountRaw = Number(payload.amount || 0);
           const amountDisplay = Number.isFinite(amountRaw)
             ? amountRaw.toLocaleString("en-NG")
             : String(payload.amount || "0");
-
-          // Try multiple possible sender name fields
           const senderName = String(
             payload.debitAccountName ||
               payload.senderName ||
@@ -4998,207 +4987,325 @@ safehavenApp.post("/", async (req, res) => {
               payload.creditAccountName ||
               "A bank transfer",
           ).trim();
-
           const paymentReference = String(
             payload.paymentReference ||
               payload.sessionId ||
               payload.reference ||
               "",
           ).trim();
+          const sessionId = String(payload.sessionId || "").trim();
+
+          // Sender details (for admin review)
+          const senderAccountNumber = String(
+            payload.debitAccountNumber || "",
+          ).trim();
+          const senderBankCode = String(
+            payload.debitBankCode ||
+              payload.originatorBankCode ||
+              payload.senderBankCode ||
+              "",
+          ).trim();
 
           console.log("[SafeHaven webhook] account.credit - extracted:", {
             creditAccountNumber,
             amountRaw,
-            amountDisplay,
             senderName,
             paymentReference,
+            sessionId,
+            senderAccountNumber,
+            senderBankCode,
           });
 
           if (!creditAccountNumber) {
             console.log(
               "[SafeHaven webhook] account.credit ignored: missing creditAccountNumber",
             );
-            console.log(
-              "[SafeHaven webhook] account.credit - available account fields:",
-              {
-                hasCreditAccountNumber: !!payload.creditAccountNumber,
-                hasCreditAccount: !!payload.creditAccount,
-                hasAccountNumber: !!payload.accountNumber,
-                hasRealCreditAccountNumber: !!payload.realCreditAccountNumber,
-                hasBeneficiaryAccountNumber: !!payload.beneficiaryAccountNumber,
-              },
-            );
-          } else {
-            let resolvedUid = null;
+            return;
+          }
+
+          // ---------- 1. Verify transfer status with SafeHaven API ----------
+          let transferVerified = false;
+          let verificationDetails = null;
+          if (paymentReference || sessionId) {
             try {
-              // Try multiple paths to find the user
-              const queries = [
-                db
-                  .collection("users")
-                  .where(
-                    "safehavenData.virtualAccount.data.attributes.accountNumber",
-                    "==",
-                    creditAccountNumber,
-                  ),
-                db
-                  .collection("users")
-                  .where(
-                    "safehavenData.virtualAccount.data.id",
-                    "==",
-                    creditAccountNumber,
-                  ),
-                db
-                  .collection("users")
-                  .where("safehavenAccountNumber", "==", creditAccountNumber),
-              ];
+              const verifyBody = {};
+              if (paymentReference)
+                verifyBody.paymentReference = paymentReference;
+              if (sessionId) verifyBody.sessionId = sessionId;
 
-              for (const query of queries) {
-                const snap = await query.limit(1).get();
-                if (!snap.empty) {
-                  resolvedUid = snap.docs[0].id;
-                  console.log(
-                    `[SafeHaven webhook] account.credit: found user via query for account ${creditAccountNumber}`,
-                  );
-                  break;
-                }
-              }
-
-              // Also check safehavenUserSetup collection
-              if (!resolvedUid) {
-                const setupSnap = await db
-                  .collection("safehavenUserSetup")
-                  .where("safehavenAccountNumber", "==", creditAccountNumber)
-                  .limit(1)
-                  .get();
-                if (!setupSnap.empty) {
-                  resolvedUid = setupSnap.docs[0].id;
-                  console.log(
-                    `[SafeHaven webhook] account.credit: found user via safehavenUserSetup for account ${creditAccountNumber}`,
-                  );
-                }
-              }
-            } catch (lookupErr) {
+              const verifyResp = await safehavenRequest({
+                path: "/transfers/status",
+                method: "POST",
+                body: verifyBody,
+              });
+              verificationDetails = verifyResp.data || verifyResp;
+              const status = String(
+                verificationDetails?.status || "",
+              ).toUpperCase();
+              transferVerified =
+                status === "SUCCESSFUL" || status === "COMPLETED";
+              console.log(
+                `[SafeHaven webhook] Transfer status check: ${status} -> verified=${transferVerified}`,
+              );
+            } catch (verifyErr) {
               console.error(
-                "[SafeHaven webhook] account.credit lookup error:",
-                lookupErr,
+                "[SafeHaven webhook] Failed to verify transfer status:",
+                verifyErr.message,
+              );
+              // Do not trust the webhook; treat as unverified
+              transferVerified = false;
+            }
+          } else {
+            console.warn(
+              "[SafeHaven webhook] No paymentReference or sessionId – cannot verify transfer",
+            );
+          }
+
+          // ---------- 2. Find the user who owns the receiving account ----------
+          let resolvedUid = null;
+          try {
+            const queries = [
+              db
+                .collection("users")
+                .where(
+                  "safehavenData.virtualAccount.data.attributes.accountNumber",
+                  "==",
+                  creditAccountNumber,
+                ),
+              db
+                .collection("users")
+                .where("safehavenAccountNumber", "==", creditAccountNumber),
+              db
+                .collection("safehavenUserSetup")
+                .where("safehavenAccountNumber", "==", creditAccountNumber),
+            ];
+            for (const query of queries) {
+              const snap = await query.limit(1).get();
+              if (!snap.empty) {
+                resolvedUid = snap.docs[0].id;
+                console.log(
+                  `[SafeHaven webhook] Found user ${resolvedUid} for account ${creditAccountNumber}`,
+                );
+                break;
+              }
+            }
+          } catch (lookupErr) {
+            console.error("[SafeHaven webhook] User lookup error:", lookupErr);
+          }
+
+          // ---------- 3. If not verified or user not found → save for admin review ----------
+          if (!transferVerified || !resolvedUid) {
+            const reviewDoc = {
+              type: "credit_webhook",
+              receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+              transferVerified,
+              userFound: !!resolvedUid,
+              userId: resolvedUid || null,
+              creditAccountNumber,
+              amount: amountRaw,
+              senderName,
+              paymentReference,
+              sessionId,
+              senderAccountNumber,
+              senderBankCode,
+              rawPayload: payload,
+              verificationDetails,
+              status: "PENDING_REVIEW",
+            };
+            await db.collection("pendingCreditReviews").add(reviewDoc);
+            console.log(
+              `[SafeHaven webhook] Saved to pendingCreditReviews (transferVerified=${transferVerified}, userFound=${!!resolvedUid})`,
+            );
+            return; // Stop processing – no automatic deposit or notification
+          }
+
+          // ---------- 4. User found & transfer verified → proceed with tier limit checks ----------
+          let limitsCheckPassed = true;
+          let rejectionReason = null;
+          let userTier = null;
+          try {
+            const userSnap = await db
+              .collection("users")
+              .doc(resolvedUid)
+              .get();
+            const userData = userSnap.data() || {};
+            userTier = userData.safehavenData?.tier?.toString();
+
+            if (userTier && ["1", "2", "3"].includes(userTier)) {
+              const tierDoc = await db
+                .collection("tiers")
+                .doc(`tier${userTier}`)
+                .get();
+              if (tierDoc.exists) {
+                const limits = tierDoc.data();
+                const transactionAmountNaira = amountRaw;
+
+                // a) Per‑transaction limit
+                if (transactionAmountNaira > limits.limitPerTransaction) {
+                  limitsCheckPassed = false;
+                  rejectionReason = `Per‑transaction limit exceeded: ₦${transactionAmountNaira.toFixed(2)} > ₦${limits.limitPerTransaction.toFixed(2)}`;
+                }
+
+                // b) Daily received sum limit
+                if (limitsCheckPassed) {
+                  const todayStart = new Date();
+                  todayStart.setHours(0, 0, 0, 0);
+                  const todayEnd = new Date();
+                  todayEnd.setHours(23, 59, 59, 999);
+                  const dailyTxns = await db
+                    .collection("transactions")
+                    .where("userId", "==", resolvedUid)
+                    .where("type", "==", "deposit")
+                    .where(
+                      "timestamp",
+                      ">=",
+                      admin.firestore.Timestamp.fromDate(todayStart),
+                    )
+                    .where(
+                      "timestamp",
+                      "<=",
+                      admin.firestore.Timestamp.fromDate(todayEnd),
+                    )
+                    .get();
+                  let dailyReceived = 0;
+                  for (const doc of dailyTxns.docs)
+                    dailyReceived += doc.data().amount || 0;
+                  const newDailyTotal = dailyReceived + transactionAmountNaira;
+                  if (newDailyTotal > limits.dailyLimit) {
+                    limitsCheckPassed = false;
+                    rejectionReason = `Daily limit exceeded: total today would be ₦${newDailyTotal.toFixed(2)} > ₦${limits.dailyLimit.toFixed(2)}`;
+                  }
+                }
+
+                // c) Max account balance limit
+                if (limitsCheckPassed) {
+                  const accountInfo =
+                    await _getSafehavenAccountForUser(resolvedUid);
+                  if (accountInfo?.accountId) {
+                    const balanceResp = await safehavenRequest({
+                      path: `/accounts/${encodeURIComponent(accountInfo.accountId)}`,
+                      method: "GET",
+                    });
+                    const currentBalanceKobo = Math.round(
+                      (balanceResp.data?.accountBalance ?? 0) * 100,
+                    );
+                    const currentBalanceNaira = currentBalanceKobo / 100;
+                    const newBalance =
+                      currentBalanceNaira + transactionAmountNaira;
+                    if (newBalance > limits.maxAccountBalance) {
+                      limitsCheckPassed = false;
+                      rejectionReason = `Max account balance exceeded: would be ₦${newBalance.toFixed(2)} > ₦${limits.maxAccountBalance.toFixed(2)}`;
+                    }
+                  }
+                }
+              } else {
+                console.warn(
+                  `[Limit] Tier limits not found for tier ${userTier}`,
+                );
+              }
+            } else {
+              console.log(
+                `[Limit] User ${resolvedUid} has no valid tier (${userTier}) – skipping limits`,
               );
             }
+          } catch (limitErr) {
+            console.error(
+              "[SafeHaven webhook] Error during limit checks:",
+              limitErr,
+            );
+            limitsCheckPassed = false;
+            rejectionReason =
+              "Internal error during limit check – admin review required";
+          }
 
-            if (!resolvedUid) {
-              console.log(
-                `[SafeHaven webhook] account.credit: no user found for accountNumber ${creditAccountNumber}`,
-              );
-            } else {
-              try {
-                const userSnap = await db
-                  .collection("users")
-                  .doc(resolvedUid)
-                  .get();
-                const userData = userSnap.exists ? userSnap.data() : {};
-                const deviceToken = userData.deviceToken || null;
-                const userEmail =
-                  userData.email || userData.emailAddress || null;
+          // ---------- 5. If limits violated → store for admin review (no reversal) ----------
+          if (!limitsCheckPassed) {
+            const reviewDoc = {
+              type: "credit_limit_violation",
+              receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+              userId: resolvedUid,
+              userTier,
+              amount: amountRaw,
+              senderName,
+              paymentReference,
+              sessionId,
+              creditAccountNumber,
+              senderAccountNumber,
+              senderBankCode,
+              violationReason: rejectionReason,
+              rawPayload: payload,
+              status: "PENDING_REVIEW",
+              recommendedAction: "MANUAL_CREDIT_REVIEW",
+            };
+            await db.collection("pendingCreditReviews").add(reviewDoc);
+            console.log(
+              `[SafeHaven webhook] Limit violation – saved to pendingCreditReviews: ${rejectionReason}`,
+            );
+            return; // No automatic deposit, no reversal
+          }
 
-                console.log(
-                  `[SafeHaven webhook] account.credit: user found - uid: ${resolvedUid}, email: ${userEmail}, hasDeviceToken: ${!!deviceToken}`,
-                );
+          // ---------- 6. All checks passed → normal credit processing ----------
+          const userData =
+            (await db.collection("users").doc(resolvedUid).get()).data() || {};
+          const deviceToken = userData.deviceToken || null;
+          const userEmail = userData.email || null;
 
-                const title = "Credit Received";
-                const bodyMsg = `NGN ${amountDisplay} has been credited to your account from ${senderName}.`;
+          console.log(
+            `[SafeHaven webhook] Limits passed – creating deposit for user ${resolvedUid}`,
+          );
 
-                if (deviceToken) {
-                  try {
-                    await admin.messaging().send({
-                      token: deviceToken,
-                      notification: { title, body: bodyMsg },
-                      data: {
-                        type: "account_credit",
-                        amount: String(payload.amount || ""),
-                        accountNumber: creditAccountNumber,
-                        reference: paymentReference,
-                      },
-                      ...FCM_CHANNEL,
-                    });
-                    console.log(
-                      `[SafeHaven webhook] account.credit push sent successfully to ${resolvedUid}`,
-                    );
-                  } catch (msgErr) {
-                    console.error(
-                      "[SafeHaven webhook] account.credit push error:",
-                      msgErr,
-                    );
-                  }
-                } else {
-                  console.log(
-                    `[SafeHaven webhook] account.credit: no device token for user ${resolvedUid}`,
-                  );
-                }
+          // Save deposit transaction
+          await db.collection("transactions").add({
+            userId: resolvedUid,
+            type: "deposit",
+            amount: amountRaw,
+            reference: paymentReference,
+            status: "SUCCESSFUL",
+            senderName,
+            timestamp: admin.firestore.FieldValue.serverTimestamp(),
+          });
 
-                try {
-                  await saveNotification(resolvedUid, {
-                    title,
-                    body: bodyMsg,
-                    type: "account_credit",
-                    amount: payload.amount || null,
-                  });
-                  console.log(
-                    `[SafeHaven webhook] account.credit notification saved for ${resolvedUid}`,
-                  );
-                } catch (saveErr) {
-                  console.error(
-                    "[SafeHaven webhook] account.credit saveNotification error:",
-                    saveErr,
-                  );
-                }
+          // Auto‑match pending storefront orders
+          await tryMatchAndSettleStorefrontOrder({
+            merchantUid: resolvedUid,
+            payment: payload,
+          });
 
-                if (userEmail) {
-                  try {
-                    console.log(
-                      `[SafeHaven webhook] account.credit: attempting to send email to ${userEmail}`,
-                    );
-                    const emailResult = await sendNotifyEmail({
-                      to: userEmail,
-                      subject: "Credit Received - PadiPay",
-                      text: `${bodyMsg}${paymentReference ? ` Reference: ${paymentReference}.` : ""}`,
-                      html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#111827;">
-                <h2 style="margin:0 0 16px;color:#10b981;">Credit Received! 🎉</h2>
-                <p style="margin:0 0 16px;">NGN ${amountDisplay} has been credited to your PadiPay account.</p>
-                <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin:0 0 16px;">
-                  <p style="margin:0 0 8px;"><strong>Amount:</strong> NGN ${amountDisplay}</p>
-                  <p style="margin:0 0 8px;"><strong>From:</strong> ${senderName}</p>
-                  ${paymentReference ? `<p style="margin:0;"><strong>Reference:</strong> ${paymentReference}</p>` : ""}
-                </div>
-                <p style="margin:0;color:#6b7280;font-size:13px;">Thank you for using PadiPay!</p>
-              </div>`,
-                    });
-                    console.log(
-                      `[SafeHaven webhook] account.credit email sent successfully to ${userEmail} - result: ${JSON.stringify(emailResult)}`,
-                    );
-                  } catch (emailErr) {
-                    console.error(
-                      "[SafeHaven webhook] account.credit email error:",
-                      {
-                        error: emailErr.message,
-                        stack: emailErr.stack,
-                        userEmail,
-                        resolvedUid,
-                      },
-                    );
-                  }
-                } else {
-                  console.log(
-                    `[SafeHaven webhook] account.credit: no email found for user ${resolvedUid}`,
-                  );
-                }
-              } catch (notifyErr) {
-                console.error(
-                  "[SafeHaven webhook] account.credit notification error:",
-                  notifyErr,
-                );
-              }
+          // Send notifications
+          if (deviceToken) {
+            try {
+              await admin.messaging().send({
+                token: deviceToken,
+                notification: {
+                  title: "Payment Received",
+                  body: `You received ₦${amountDisplay} from ${senderName}`,
+                },
+                ...FCM_CHANNEL,
+              });
+            } catch (msgErr) {
+              console.error("FCM error:", msgErr);
+            }
+          }
+          await saveNotification(resolvedUid, {
+            title: "Payment Received",
+            body: `You received ₦${amountDisplay} from ${senderName}`,
+            type: "payment_received",
+            amount: amountRaw,
+          });
+          if (userEmail) {
+            try {
+              await sendNotifyEmail({
+                to: userEmail,
+                subject: "Credit Received – PadiPay",
+                html: `<p>You received ₦${amountDisplay} from ${senderName}.</p>`,
+                text: `You received ₦${amountDisplay} from ${senderName}.`,
+              });
+            } catch (emailErr) {
+              console.error("Email error:", emailErr);
             }
           }
         }
+        // ==================== END ACCOUNT.CREDIT EVENT ====================
       } catch (postErr) {
         console.error("SafeHaven webhook post-processing error:", postErr);
       }
