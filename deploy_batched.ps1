@@ -10,7 +10,6 @@ $functions = @(
     "safehavenCreateUser",
     "safehavenCreateBusinessUser",
     "safehavenVerifyBusinessCustomer",
-    "safehavenUpgradeCustomerKyc",
     "safehavenInitiateIdentityVerification",
     "safehavenValidateIdentityVerification",
     "safehavenCreateSubAccount",

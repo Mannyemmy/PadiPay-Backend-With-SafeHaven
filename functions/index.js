@@ -4835,60 +4835,113 @@ safehavenApp.post("/", async (req, res) => {
           evtType.toString().toLowerCase() === "identitycreditcheck"
         ) {
           const payload = parsed.data || parsed;
-          const accountNumber = String(
-            payload.debitAccountNumber ||
-              payload.accountNumber ||
-              payload.debitAccount ||
+          const identityNumber = String(
+            payload.identityNumber || // BVN number
+              payload.number ||
               "",
           ).trim();
           const status = String(payload.status || "")
             .trim()
             .toUpperCase();
-          const debitMsg = String(
-            payload.debitMessage || payload.message || payload.reason || "",
-          ).trim();
+          const otpVerified = payload.otpVerified === true;
+          const identityId = String(payload._id || payload.id || "").trim();
 
-          const identityCheckId = String(
-            payload._id || payload.id || "",
-          ).trim();
+          console.log(
+            `[SafeHaven webhook] identityCreditCheck: BVN ${identityNumber}, status ${status}, otpVerified ${otpVerified}, identityId ${identityId}`,
+          );
+
           let resolvedUid = null;
 
-          if (identityCheckId) {
+          // --- FIX: Lookup by BVN (identityVerification.number) ---
+          if (identityNumber) {
             try {
               const setupQuery = await db
                 .collection("safehavenUserSetup")
-                .where("identityId", "==", identityCheckId)
+                .where("identityVerification.number", "==", identityNumber)
                 .limit(1)
                 .get();
+
               if (!setupQuery.empty) {
-                resolvedUid = setupQuery.docs[0].id;
-                await setupQuery.docs[0].ref.set(
+                const setupDoc = setupQuery.docs[0];
+                resolvedUid = setupDoc.id; // document ID is the user UID (adjust if needed)
+                const setupRef = setupDoc.ref;
+
+                // Store the identityId and status back into the setup document for traceability
+                await setupRef.set(
                   {
+                    identityId: identityId,
                     identityCheckStatus: status,
-                    identityCheckMessage: debitMsg || null,
+                    identityCheckMessage: payload.debitMessage || null,
                     identityCheckUpdatedAt:
                       admin.firestore.FieldValue.serverTimestamp(),
+                    // If verification succeeded, mark it as fully verified
+                    "identityVerification.verified":
+                      status === "SUCCESS" && otpVerified,
+                    "identityVerification.verifiedAt":
+                      status === "SUCCESS" && otpVerified
+                        ? admin.firestore.FieldValue.serverTimestamp()
+                        : admin.firestore.FieldValue.delete(),
+                    "identityVerification.identityId": identityId,
                   },
                   { merge: true },
                 );
+
                 console.log(
-                  `[SafeHaven webhook] identityCreditCheck status ${status} stored for uid ${resolvedUid}, identityId ${identityCheckId}`,
+                  `[SafeHaven webhook] identityCreditCheck: updated setup for user ${resolvedUid}, BVN ${identityNumber}, identityId ${identityId}`,
                 );
               } else {
                 console.log(
-                  `[SafeHaven webhook] no safehavenUserSetup found for identityId ${identityCheckId}`,
+                  `[SafeHaven webhook] no safehavenUserSetup found for BVN ${identityNumber}`,
                 );
               }
             } catch (setupErr) {
               console.warn(
-                "[SafeHaven webhook] failed to update identityCheckStatus:",
+                "[SafeHaven webhook] failed to query/update safehavenUserSetup:",
                 setupErr.message,
               );
             }
+          } else {
+            console.log(
+              "[SafeHaven webhook] identityCreditCheck: missing identityNumber",
+            );
           }
 
+          // --- If we resolved a user, update the user's document and send notifications ---
           if (resolvedUid) {
             try {
+              // Update user's safehavenData.identityVerification with success/failure info
+              if (status === "SUCCESS" && otpVerified) {
+                await db
+                  .collection("users")
+                  .doc(resolvedUid)
+                  .update({
+                    "safehavenData.identityVerification": {
+                      verified: true,
+                      bvn: identityNumber,
+                      identityId: identityId,
+                      verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+                      lastWebhookData: payload, // optional for debugging
+                    },
+                  });
+                console.log(
+                  `[SafeHaven webhook] identity verification marked SUCCESS for user ${resolvedUid}`,
+                );
+              } else {
+                // Optionally store failure reason
+                await db
+                  .collection("users")
+                  .doc(resolvedUid)
+                  .update({
+                    "safehavenData.identityVerification.failedAttempts":
+                      admin.firestore.FieldValue.increment(1),
+                    "safehavenData.identityVerification.lastFailureReason":
+                      payload.debitMessage || "Unknown",
+                    "safehavenData.identityVerification.lastFailureAt":
+                      admin.firestore.FieldValue.serverTimestamp(),
+                  });
+              }
+
+              // Fetch user data for notifications
               const userSnap = await db
                 .collection("users")
                 .doc(resolvedUid)
@@ -4898,36 +4951,36 @@ safehavenApp.post("/", async (req, res) => {
               const userEmail = userData.email || null;
 
               const title =
-                status === "FAILED"
-                  ? "Identity Verification Debit Failed"
-                  : "Identity Verification Debit";
+                status === "SUCCESS" && otpVerified
+                  ? "Identity Verification Successful"
+                  : "Identity Verification Failed";
               const bodyMsg =
-                status === "FAILED"
-                  ? `Identity verification debit failed: ${debitMsg} (code: ${payload.debitResponsCode || ""})`
-                  : `Identity verification debit ${status.toLowerCase()}.`;
+                status === "SUCCESS" && otpVerified
+                  ? "Your BVN has been successfully verified."
+                  : `Verification failed: ${payload.debitMessage || "OTP verification failed or debit declined"}.`;
 
+              // Send push notification
               if (deviceToken) {
                 try {
-                  // optional push notification
+                  // await admin.messaging().send({
+                  //   token: deviceToken,
+                  //   notification: { title, body: bodyMsg },
+                  //   // ... any FCM channel config
+                  // });
                 } catch (msgErr) {
                   console.error("SafeHaven webhook push error:", msgErr);
                 }
               }
 
-              try {
-                await saveNotification(resolvedUid, {
-                  title,
-                  body: bodyMsg,
-                  type: "identity_credit_check",
-                  amount: payload.amount || null,
-                });
-              } catch (saveErr) {
-                console.error(
-                  "SafeHaven webhook saveNotification error:",
-                  saveErr,
-                );
-              }
+              // Save in-app notification
+              await saveNotification(resolvedUid, {
+                title,
+                body: bodyMsg,
+                type: "identity_credit_check",
+                amount: payload.amount || null,
+              });
 
+              // Send email
               if (userEmail) {
                 try {
                   await sendNotifyEmail({
@@ -4943,16 +4996,26 @@ safehavenApp.post("/", async (req, res) => {
               }
             } catch (notifyErr) {
               console.error(
-                "[SafeHaven webhook] user notification error:",
+                "[SafeHaven webhook] user notification/update error:",
                 notifyErr,
               );
             }
           } else {
             console.log(
-              `[SafeHaven webhook] identityCreditCheck: could not resolve user for identityId ${identityCheckId}`,
+              `[SafeHaven webhook] identityCreditCheck: could not resolve user for BVN ${identityNumber}`,
             );
+            // Optionally store failed webhook for manual processing
+            await db.collection("pendingCreditReviews").add({
+              type: "identity_check_failed",
+              receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+              identityNumber,
+              identityId,
+              rawPayload: payload,
+              reason: "User not found (no safehavenUserSetup with that BVN)",
+            });
           }
         }
+        // ==================== END IDENTITY CREDIT CHECK ====================
 
         // ==================== ACCOUNT.CREDIT EVENT ====================
         if (evtType && evtType.toString().toLowerCase() === "account.credit") {
@@ -14145,11 +14208,53 @@ exports.sudoWebhook = onRequest(
       res.status(405).send("Method Not Allowed");
       return;
     }
-    console.log(
-      "[sudoWebhook] Received request with headers:",
-      JSON.stringify(req.headers),
-    );
 
+    // Helper to get real client IP (works for v2 HTTP functions)
+    const getClientIp = (req) => {
+      const forwarded = req.headers["x-forwarded-for"];
+      if (forwarded) {
+        return forwarded.split(",")[0].trim();
+      }
+      return req.ip || "unknown";
+    };
+    const clientIp = getClientIp(req);
+
+    const authHeader = req.headers.authorization;
+    const expectedSecret = sudoWebhookSecret.value();
+
+    const isAuthorized =
+      authHeader && expectedSecret && authHeader === expectedSecret;
+
+    if (!isAuthorized) {
+      const UNAUTH_LIMIT = 5;
+      const UNAUTH_WINDOW_MS = 60 * 60 * 1000;
+
+      let rateLimited = false;
+      if (clientIp !== "unknown") {
+        const count = await _incrRateLimit(
+          "sudo_webhook_unauth",
+          clientIp,
+          UNAUTH_LIMIT,
+          UNAUTH_WINDOW_MS,
+        );
+        if (count > UNAUTH_LIMIT) {
+          rateLimited = true;
+        }
+      }
+
+      console.warn("[sudoWebhook] Unauthorized request", {
+        ip: clientIp,
+        rateLimited,
+      });
+      if (rateLimited) {
+        return res
+          .status(429)
+          .json({ error: "Too many unauthorized requests. Try again later." });
+      }
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    console.log("[sudoWebhook] Authorized request received", { ip: clientIp });
     const payload = req.body || {};
     const eventType = payload?.type || "unknown";
     const eventData = payload?.data || {};
