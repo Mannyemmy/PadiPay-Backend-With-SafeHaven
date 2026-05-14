@@ -31,13 +31,16 @@ const getanchorSecretKey = defineSecret("GETANCHOR_SECRET_KEY");
 const qoreIdApiKey = defineSecret("QOREID_API_KEY");
 const qoreIdClientId = defineSecret("QOREID_CLIENT_ID");
 const safehavenWebhookToken = defineSecret("SAFEHAVEN_WEBHOOK_TOKEN");
-// Safe Haven MFB ? OAuth2 client-credentials secrets
+// Safe Haven MFB – OAuth2 client-credentials secrets
 const safehavenClientId = defineSecret("SAFEHAVEN_CLIENT_ID");
 const safehavenPrivateKey = defineSecret("SAFEHAVEN_PRIVATE_KEY"); // RS256 PEM private key
 const safehavenCompanyUrl = defineSecret("SAFEHAVEN_COMPANY_URL"); // e.g. https://yourcompany.com
 const safehavenDebitAccountNumber = defineSecret(
   "SAFEHAVEN_DEBIT_ACCOUNT_NUMBER",
 );
+// Efix webhook endpoint for cross-project SafeHaven event handling
+const efixSafehavenWebhookUrl = defineSecret("EFIX_SAFEHAVEN_WEBHOOK_URL");
+const efixSafehavenWebhookSecret = defineSecret("EFIX_SAFEHAVEN_WEBHOOK_SECRET");
 // SafeHaven webhook secret removed: SafeHaven does not require HMAC verification
 // const safehavenWebhookSecret = defineSecret("SAFEHAVEN_WEBHOOK_SECRET");
 // Use sandbox URL for all Getanchor API calls
@@ -60,6 +63,9 @@ const smtpUser = defineSecret("SMTP_USER");
 const smtpPass = defineSecret("SMTP_PASS");
 const db = admin.firestore();
 const ttsClient = new textToSpeech.TextToSpeechClient();
+const { registerExternalApi } = require("./externalApi");
+
+const externalApiMasterKey = defineSecret("EXTERNAL_API_MASTER_KEY");
 
 // FCM platform config ? forces Android to use padi_transactions_channel (Importance.max, sound ON)
 // and sets high priority so messages wake the device even in background/Doze.
@@ -102,6 +108,71 @@ safehavenApp.use(
   }),
 );
 
+// SafeHaven webhook handler
+safehavenApp.post("/", async (req, res) => {
+  try {
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method not allowed" });
+    }
+
+    const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
+    const headers = req.headers || {};
+    const rawBodyString = rawBody ? rawBody.toString("utf8") : "";
+    let parsed = null;
+    try {
+      parsed = rawBodyString ? JSON.parse(rawBodyString) : req.body;
+    } catch (e) {
+      parsed = req.body || null;
+    }
+
+   
+    console.log("[SafeHaven webhook] received", {
+      body: rawBodyString,
+    });
+
+    // Persist webhook to Firestore for later inspection
+    await db.collection("safehavenWebhooks").add({
+      receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+      headers,
+      rawBody: rawBodyString,
+      body: parsed,
+    });
+
+    // Forward to Efix
+    await forwardSafeHavenWebhookToEfix(parsed);
+    console.log("[SafeHaven webhook] forwarded to Efix "+parsed);
+
+    // Process events locally (same logic as before)
+    (async () => {
+      try {
+        const evtType =
+          parsed && (parsed.eventType || parsed.type)
+            ? parsed.eventType || parsed.type
+            : null;
+
+        // Add your event processing logic here
+        console.log("[SafeHaven webhook] Processing event:", evtType);
+
+        // For account.debit events, check for sessionId
+        if (evtType === "account.debit") {
+          const sessionId = parsed?.data?.sessionId;
+          if (!sessionId) {
+            console.log("[SafeHaven webhook] account.debit: Missing sessionId");
+          }
+        }
+
+      } catch (err) {
+        console.error("[SafeHaven webhook] Processing error:", err.message);
+      }
+    })();
+
+    res.status(200).json({ status: "ok" });
+  } catch (err) {
+    console.error("[SafeHaven webhook] Error:", err.message);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // Export SafeHaven webhook as a separate Cloud Function
 exports.safehavenWebhook = onRequest(
   {
@@ -113,7 +184,9 @@ exports.safehavenWebhook = onRequest(
       smtpHost,
       smtpUser,
       smtpPass,
-      safehavenWebhookToken, // <-- add this secret (define it first)
+      safehavenWebhookToken,
+      efixSafehavenWebhookUrl,
+      efixSafehavenWebhookSecret,
     ],
   },
   safehavenApp,
@@ -2200,6 +2273,15 @@ const _getSafehavenToken = async () => {
  * Makes an authenticated request to the Safe Haven MFB API.
  * Always includes Authorization: Bearer <token> and ClientID header.
  */
+const isValidHttpsUrl = (value) => {
+  try {
+    const parsed = new URL(String(value));
+    return parsed.protocol === "https:";
+  } catch (_) {
+    return false;
+  }
+};
+
 const safehavenRequest = async ({ path, method = "GET", body = null }) => {
   const { accessToken, clientId, baseUrl, mode } = await _getSafehavenToken();
   const url = `${baseUrl}${path}`;
@@ -2240,6 +2322,16 @@ const safehavenRequest = async ({ path, method = "GET", body = null }) => {
   }
   return parsed;
 };
+
+registerExternalApi({
+  exports, onRequest, db, admin,
+  safehavenRequest,
+  safehavenClientId, safehavenPrivateKey,
+  safehavenCompanyUrl, safehavenDebitAccountNumber,
+  qoreIdClientId, qoreIdApiKey,
+  _incrRateLimit,
+  externalApiMasterKey,
+});
 
 // Adds consistent logs for callable entry/success/error so app issues can be
 // traced quickly in Cloud Functions logs.
@@ -2740,15 +2832,33 @@ exports.safehavenInitiateIdentityVerification = onCallLogged(
       );
     }
 
-    const resp = await safehavenRequest({
-      path: "/identity/v2",
-      method: "POST",
-      body: {
-        type,
-        number,
-        debitAccountNumber,
-        async: asyncMode,
-      },
+    const callbackUrl = String(
+      data.data.callbackUrl ||
+        data.data.webhookUrl ||
+        process.env.SAFEHAVEN_IDENTITY_CALLBACK_URL ||
+        process.env.SAFEHAVEN_IDENTITY_WEBHOOK_URL ||
+        "",
+    ).trim();
+    const requestBody = {
+      type,
+      number,
+      debitAccountNumber,
+      async: asyncMode,
+    };
+        if (callbackUrl) {
+          if (!isValidHttpsUrl(callbackUrl)) {
+            throw new HttpsError(
+              "invalid-argument",
+              "callbackUrl must be a valid HTTPS URL",
+            );
+          }
+          requestBody.callbackUrl = callbackUrl;
+        }
+
+        const resp = await safehavenRequest({
+          path: "/identity/v2",
+          method: "POST",
+          body: requestBody,
     });
 
     const verification = resp.data || {};
@@ -2766,6 +2876,7 @@ exports.safehavenInitiateIdentityVerification = onCallLogged(
             type,
             number,
             status: verification.status || "PENDING",
+            source: "padipay", // Mark as padipay-initiated
             initiatedAt: admin.firestore.FieldValue.serverTimestamp(),
             rawInitiate: verification,
           },
@@ -3652,12 +3763,21 @@ exports.safehavenFetchAccountNumber = onCall(
 
 const notifyUserByAccountId = async (accountId, notification) => {
   try {
-    const snap = await admin
+    let snap = await admin
       .firestore()
       .collection("users")
-      .where("getAnchorData.virtualAccount.data.id", "==", accountId)
+      .where("safehavenData.virtualAccount.data.id", "==", accountId)
       .limit(1)
       .get();
+
+    if (snap.empty) {
+      snap = await admin
+        .firestore()
+        .collection("users")
+        .where("getAnchorData.virtualAccount.data.id", "==", accountId)
+        .limit(1)
+        .get();
+    }
 
     if (snap.empty) {
       console.log(`No user found for accountId ${accountId}`);
@@ -3707,12 +3827,21 @@ const saveNotification = async (userId, { title, body, type, amount }) => {
  */
 const sendEmailNotificationByAccountId = async (accountId, { title, body }) => {
   try {
-    const snap = await admin
+    let snap = await admin
       .firestore()
       .collection("users")
-      .where("getAnchorData.virtualAccount.data.id", "==", accountId)
+      .where("safehavenData.virtualAccount.data.id", "==", accountId)
       .limit(1)
       .get();
+
+    if (snap.empty) {
+      snap = await admin
+        .firestore()
+        .collection("users")
+        .where("getAnchorData.virtualAccount.data.id", "==", accountId)
+        .limit(1)
+        .get();
+    }
 
     if (snap.empty) {
       console.log(`No user found for accountId ${accountId} to send email`);
@@ -4863,867 +4992,51 @@ const verifySafehavenSignature = (rawBody, signature, secret) => {
   return { valid: false, mode: "no-match" };
 };
 
-// SafeHaven webhook endpoint - logs incoming events (no signature verification)
-safehavenApp.post("/", async (req, res) => {
+// Forward SafeHaven webhook to efix if initiated by efix
+const forwardSafeHavenWebhookToEfix = async (payload) => {
   try {
-    const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
-    const headers = req.headers || {};
-    const rawBodyString = rawBody ? rawBody.toString("utf8") : "";
-    let parsed = null;
-    try {
-      parsed = rawBodyString ? JSON.parse(rawBodyString) : req.body;
-    } catch (e) {
-      parsed = req.body || null;
+    const efixUrl = String(efixSafehavenWebhookUrl.value() || "").trim();
+    if (!efixUrl) return false;
+
+    const body = JSON.stringify(payload);
+    const headers = {
+      "Content-Type": "application/json",
+    };
+
+    // Send token-based auth instead of HMAC (Efix expects token validation)
+    const efixToken = efixSafehavenWebhookSecret.value
+      ? String(efixSafehavenWebhookSecret.value()).trim()
+      : "";
+    if (efixToken) {
+      headers["x-safehaven-webhook-token"] = efixToken;
     }
 
-    console.log("[SafeHaven webhook] received", {
-      body: rawBodyString, // Full body, no truncation
-    });
-    // Persist webhook to Firestore for later inspection
-    await db.collection("safehavenWebhooks").add({
-      receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+    const response = await fetch(efixUrl, {
+      method: "POST",
       headers,
-      rawBody: rawBodyString,
-      body: parsed,
-      signatureHeader: null,
-      signatureVerified: null,
-      verificationMode: "disabled",
+      body,
     });
 
-    // Post-process events (non-blocking best-effort)
-    (async () => {
-      try {
-        const evtType =
-          parsed && (parsed.eventType || parsed.type)
-            ? parsed.eventType || parsed.type
-            : null;
-
-        // ----- identityCreditCheck (unchanged, keep as is) -----
-        // identityCreditCheck handling (unchanged)
-
-        if (
-          evtType &&
-          evtType.toString().toLowerCase() === "identitycreditcheck"
-        ) {
-          const payload = parsed.data || parsed;
-          const identityId = String(
-            payload._id || payload.id || payload.identityId || "",
-          ).trim();
-          const identityNumber = String(
-            payload.identityNumber || payload.number || "",
-          ).trim();
-          const status = String(payload.status || "")
-            .trim()
-            .toUpperCase();
-          const otpVerified = payload.otpVerified === true;
-
-          // We need either identityId or BVN to proceed
-          if (!identityId && !identityNumber) {
-            console.error(
-              "[SafeHaven webhook] missing identityId and identityNumber",
-            );
-            await db.collection("pendingCreditReviews").add({
-              type: "identity_check_no_identifier",
-              receivedAt: admin.firestore.FieldValue.serverTimestamp(),
-              rawPayload: payload,
-            });
-            return;
-          }
-
-          // 1. Build a list of safehavenUserSetup documents to update
-          let docsToUpdate = [];
-          const seenUids = new Set();
-
-          // Try to find by identityId first (most precise)
-          if (identityId) {
-            const queryById = await db
-              .collection("safehavenUserSetup")
-              .where("identityVerification.identityId", "==", identityId)
-              .limit(1)
-              .get();
-            for (const doc of queryById.docs) {
-              docsToUpdate.push({
-                ref: doc.ref,
-                uid: doc.id,
-                source: "identityId",
-              });
-              seenUids.add(doc.id);
-            }
-          }
-
-          // Also find ALL documents with this BVN (ensures all accounts of this user get updated)
-          if (identityNumber) {
-            const queryByBvn = await db
-              .collection("safehavenUserSetup")
-              .where("identityVerification.number", "==", identityNumber)
-              .get();
-            for (const doc of queryByBvn.docs) {
-              if (!seenUids.has(doc.id)) {
-                docsToUpdate.push({ ref: doc.ref, uid: doc.id, source: "BVN" });
-                seenUids.add(doc.id);
-              }
-            }
-          }
-
-          if (docsToUpdate.length === 0) {
-            console.error(
-              `[SafeHaven webhook] No safehavenUserSetup found for identityId=${identityId} or BVN=${identityNumber}`,
-            );
-            await db.collection("pendingCreditReviews").add({
-              type: "identity_check_orphan",
-              receivedAt: admin.firestore.FieldValue.serverTimestamp(),
-              identityId,
-              identityNumber,
-              rawPayload: payload,
-              reason: "No document found by identityId or BVN",
-            });
-            return;
-          }
-
-          // 2. Update each matched document and collect unique user IDs for notifications
-          const updatedUids = new Set();
-          for (const { ref, uid, source } of docsToUpdate) {
-            try {
-              await ref.set(
-                {
-                  identityId: identityId,
-                  identityCheckStatus: status,
-                  identityCheckMessage: payload.debitMessage || null,
-                  identityCheckUpdatedAt:
-                    admin.firestore.FieldValue.serverTimestamp(),
-                  "identityVerification.verified":
-                    status === "SUCCESS" && otpVerified,
-                  "identityVerification.verifiedAt":
-                    status === "SUCCESS" && otpVerified
-                      ? admin.firestore.FieldValue.serverTimestamp()
-                      : admin.firestore.FieldValue.delete(),
-                  "identityVerification.identityId": identityId,
-                },
-                { merge: true },
-              );
-              updatedUids.add(uid);
-              console.log(
-                `[webhook] Updated ${source} document for user ${uid}`,
-              );
-            } catch (err) {
-              console.error(
-                `[webhook] Failed to update document for user ${uid}:`,
-                err.message,
-              );
-            }
-          }
-
-          // 3. For each unique user, update their main user document and send notifications
-          for (const uid of updatedUids) {
-            try {
-              // Update user's safehavenData.identityVerification (only if SUCCESS)
-              if (status === "SUCCESS" && otpVerified) {
-                await db
-                  .collection("users")
-                  .doc(uid)
-                  .update({
-                    "safehavenData.identityVerification": {
-                      verified: true,
-                      bvn: identityNumber,
-                      identityId: identityId,
-                      verifiedAt: admin.firestore.FieldValue.serverTimestamp(),
-                      lastWebhookData: payload,
-                    },
-                  });
-                console.log(
-                  `[webhook] identity SUCCESS marked for user ${uid}`,
-                );
-              } else {
-                // Optionally record failure attempts
-                await db
-                  .collection("users")
-                  .doc(uid)
-                  .update({
-                    "safehavenData.identityVerification.failedAttempts":
-                      admin.firestore.FieldValue.increment(1),
-                    "safehavenData.identityVerification.lastFailureReason":
-                      payload.debitMessage || "Unknown",
-                    "safehavenData.identityVerification.lastFailureAt":
-                      admin.firestore.FieldValue.serverTimestamp(),
-                  });
-              }
-
-              // Fetch user data for notifications
-              const userSnap = await db.collection("users").doc(uid).get();
-              const userData = userSnap.exists ? userSnap.data() : {};
-              const deviceToken = userData.deviceToken || null;
-              const userEmail = userData.email || null;
-
-              const title =
-                status === "SUCCESS" && otpVerified
-                  ? "Identity Verification Successful"
-                  : "Identity Verification Failed";
-              const bodyMsg =
-                status === "SUCCESS" && otpVerified
-                  ? "Your BVN has been successfully verified."
-                  : `Verification failed: ${payload.debitMessage || "OTP verification failed or debit declined"}.`;
-
-              // Push notification (uncomment when ready)
-              // if (deviceToken) {
-              //   try {
-              //     await admin.messaging().send({ token: deviceToken, notification: { title, body: bodyMsg } });
-              //   } catch (e) { console.error("Push error:", e); }
-              // }
-
-              // In-app notification
-              await saveNotification(uid, {
-                title,
-                body: bodyMsg,
-                type: "identity_credit_check",
-                amount: payload.amount || null,
-              });
-
-              // Email
-              // if (userEmail) {
-              //   try {
-              //     await sendNotifyEmail({
-              //       to: userEmail,
-              //       subject: title,
-              //       text: bodyMsg,
-              //       html: `<p>${bodyMsg}</p>`,
-              //     });
-              //     console.log(`[webhook] emailed ${userEmail}`);
-              //   } catch (emailErr) {
-              //     console.error("Email error:", emailErr);
-              //   }
-              // }
-            } catch (err) {
-              console.error(
-                `[webhook] Failed to update user ${uid}:`,
-                err.message,
-              );
-            }
-          }
-        }
-        // ----- ACCOUNT.CREDIT (including company account detection) -----
-        else if (
-          evtType &&
-          (evtType.toString().toLowerCase() === "account.credit" ||
-            evtType.toString().toLowerCase() === "transfer")
-        ) {
-          const payload = parsed.data || parsed;
-          console.log(
-            "[SafeHaven webhook] account.credit - full payload:",
-            JSON.stringify(payload, null, 2),
-          );
-
-          const sessionId = String(payload.sessionId || "").trim();
-          if (!sessionId) {
-            console.warn(
-              "[SafeHaven webhook] No sessionId – cannot verify. Saving for review.",
-            );
-            await db.collection("pendingCreditReviews").add({
-              type: "credit_webhook",
-              receivedAt: admin.firestore.FieldValue.serverTimestamp(),
-              rawPayload: payload,
-              status: "PENDING_REVIEW",
-              reason: "Missing sessionId",
-            });
-            return;
-          }
-
-          // Verify transfer
-          let transferVerified = false;
-          let verificationDetails = null;
-          try {
-            const verifyResp = await safehavenRequest({
-              path: "/transfers/status",
-              method: "POST",
-              body: { sessionId },
-            });
-            verificationDetails = verifyResp.data || verifyResp;
-            const status = String(
-              verificationDetails?.status || "",
-            ).toUpperCase();
-            transferVerified =
-              status === "SUCCESSFUL" || status === "COMPLETED";
-            console.log(
-              `[SafeHaven webhook] Transfer status (sessionId): ${status} -> verified=${transferVerified}`,
-            );
-          } catch (verifyErr) {
-            console.error(
-              "[SafeHaven webhook] Transfer verification failed:",
-              verifyErr.message,
-            );
-            transferVerified = false;
-          }
-
-          if (!transferVerified) {
-            console.log(
-              `[SafeHaven webhook] Transfer NOT verified – saving to pendingCreditReviews`,
-            );
-            await db.collection("pendingCreditReviews").add({
-              type: "credit_webhook",
-              receivedAt: admin.firestore.FieldValue.serverTimestamp(),
-              sessionId,
-              verificationDetails,
-              rawPayload: payload,
-              status: "PENDING_REVIEW",
-              reason: "Transfer not verified by SafeHaven",
-            });
-            return;
-          }
-
-          // Extract fields
-          const creditAccountNumber = String(
-            payload.creditAccountNumber ||
-              payload.creditAccount ||
-              payload.accountNumber ||
-              payload.realCreditAccountNumber ||
-              payload.beneficiaryAccountNumber ||
-              "",
-          ).trim();
-          const amountRaw = Number(payload.amount || 0);
-          const amountDisplay = Number.isFinite(amountRaw)
-            ? amountRaw.toLocaleString("en-NG")
-            : String(payload.amount || "0");
-          const senderName = String(
-            payload.debitAccountName ||
-              payload.senderName ||
-              payload.originatorAccountName ||
-              payload.creditAccountName ||
-              "A bank transfer",
-          ).trim();
-          const senderAccountNumber = String(
-            payload.debitAccountNumber || "",
-          ).trim();
-          const senderBankCode = String(
-            payload.debitBankCode ||
-              payload.originatorBankCode ||
-              payload.senderBankCode ||
-              "",
-          ).trim();
-
-          console.log(
-            "[SafeHaven webhook] account.credit - extracted after verification:",
-            {
-              creditAccountNumber,
-              amountRaw,
-              senderName,
-              sessionId,
-              senderAccountNumber,
-              senderBankCode,
-            },
-          );
-
-          if (!creditAccountNumber) {
-            console.log(
-              "[SafeHaven webhook] account.credit ignored: missing creditAccountNumber",
-            );
-            return;
-          }
-
-          // ---- Check if this is the COMPANY'S main account ----
-          let isCompanyAccount = false;
-          try {
-            const companyDoc = await db
-              .collection("company")
-              .doc("safehavenAccountDetails")
-              .get();
-            if (companyDoc.exists) {
-              const companyData = companyDoc.data() || {};
-              const companyAccountNumber =
-                companyData.safehavenAccountNumber || "";
-              if (companyAccountNumber === creditAccountNumber) {
-                isCompanyAccount = true;
-                console.log(
-                  `[SafeHaven webhook] Credit to COMPANY account ${creditAccountNumber} – storing as transaction but not sending user notification`,
-                );
-              }
-            }
-          } catch (companyErr) {
-            console.warn(
-              "[SafeHaven webhook] Failed to check company account:",
-              companyErr.message,
-            );
-          }
-
-          // If it's a company account, record the transaction but skip user-specific actions
-          if (isCompanyAccount) {
-            await db.collection("companyTransactions").add({
-              type: "credit",
-              amount: amountRaw,
-              reference: sessionId,
-              senderName,
-              senderAccountNumber,
-              senderBankCode,
-              sourcePayload: payload,
-              timestamp: admin.firestore.FieldValue.serverTimestamp(),
-            });
-            console.log(
-              `[SafeHaven webhook] Company account credited: ${amountRaw} from ${senderName}`,
-            );
-            return; // No further user processing
-          }
-
-          // ---- Find the user who owns this account (non-company) ----
-          let resolvedUid = null;
-          try {
-            const queries = [
-              db
-                .collection("users")
-                .where(
-                  "safehavenData.virtualAccount.data.attributes.accountNumber",
-                  "==",
-                  creditAccountNumber,
-                ),
-              db
-                .collection("users")
-                .where("safehavenAccountNumber", "==", creditAccountNumber),
-              db
-                .collection("safehavenUserSetup")
-                .where("safehavenAccountNumber", "==", creditAccountNumber),
-              db
-                .collection("businesses")
-                .where(
-                  "safehavenData.virtualAccount.data.attributes.accountNumber",
-                  "==",
-                  creditAccountNumber,
-                ),
-              db
-                .collection("businesses")
-                .where("safehavenAccountNumber", "==", creditAccountNumber),
-            ];
-            for (const query of queries) {
-              const snap = await query.limit(1).get();
-              if (!snap.empty) {
-                resolvedUid = snap.docs[0].id;
-                console.log(
-                  `[SafeHaven webhook] Found user ${resolvedUid} for account ${creditAccountNumber}`,
-                );
-                break;
-              }
-            }
-          } catch (lookupErr) {
-            console.error("[SafeHaven webhook] User lookup error:", lookupErr);
-          }
-
-          if (!resolvedUid) {
-            console.log(
-              `[SafeHaven webhook] User not found for account ${creditAccountNumber} – saving for review`,
-            );
-            await db.collection("pendingCreditReviews").add({
-              type: "credit_webhook",
-              receivedAt: admin.firestore.FieldValue.serverTimestamp(),
-              sessionId,
-              creditAccountNumber,
-              amount: amountRaw,
-              senderName,
-              senderAccountNumber,
-              senderBankCode,
-              rawPayload: payload,
-              status: "PENDING_REVIEW",
-              reason: "User account not found",
-            });
-            return;
-          }
-
-          // ---- Tier limits (unchanged) ----
-          let limitsCheckPassed = true;
-          let rejectionReason = null;
-          let userTier = null;
-          try {
-            const userSnap = await db
-              .collection("users")
-              .doc(resolvedUid)
-              .get();
-            const userData = userSnap.data() || {};
-            userTier = userData.safehavenData?.tier?.toString();
-            if (userTier && ["1", "2", "3"].includes(userTier)) {
-              const tierDoc = await db
-                .collection("tiers")
-                .doc(`tier${userTier}`)
-                .get();
-              if (tierDoc.exists) {
-                const limits = tierDoc.data();
-                const transactionAmountNaira = amountRaw;
-                if (transactionAmountNaira > limits.limitPerTransaction) {
-                  limitsCheckPassed = false;
-                  rejectionReason = `Per‑transaction limit exceeded: ₦${transactionAmountNaira.toFixed(2)} > ₦${limits.limitPerTransaction.toFixed(2)}`;
-                }
-                if (limitsCheckPassed) {
-                  const todayStart = new Date();
-                  todayStart.setHours(0, 0, 0, 0);
-                  const todayEnd = new Date();
-                  todayEnd.setHours(23, 59, 59, 999);
-                  const dailyTxns = await db
-                    .collection("transactions")
-                    .where("userId", "==", resolvedUid)
-                    .where("type", "==", "deposit")
-                    .where(
-                      "timestamp",
-                      ">=",
-                      admin.firestore.Timestamp.fromDate(todayStart),
-                    )
-                    .where(
-                      "timestamp",
-                      "<=",
-                      admin.firestore.Timestamp.fromDate(todayEnd),
-                    )
-                    .get();
-                  let dailyReceived = 0;
-                  for (const doc of dailyTxns.docs)
-                    dailyReceived += doc.data().amount || 0;
-                  const newDailyTotal = dailyReceived + transactionAmountNaira;
-                  if (newDailyTotal > limits.dailyLimit) {
-                    limitsCheckPassed = false;
-                    rejectionReason = `Daily limit exceeded: total today would be ₦${newDailyTotal.toFixed(2)} > ₦${limits.dailyLimit.toFixed(2)}`;
-                  }
-                }
-                if (limitsCheckPassed) {
-                  const accountInfo =
-                    await _getSafehavenAccountForUser(resolvedUid);
-                  if (accountInfo?.accountId) {
-                    const balanceResp = await safehavenRequest({
-                      path: `/accounts/${encodeURIComponent(accountInfo.accountId)}`,
-                      method: "GET",
-                    });
-                    const currentBalanceKobo = Math.round(
-                      (balanceResp.data?.accountBalance ?? 0) * 100,
-                    );
-                    const currentBalanceNaira = currentBalanceKobo / 100;
-                    const newBalance =
-                      currentBalanceNaira + transactionAmountNaira;
-                    if (newBalance > limits.maxAccountBalance) {
-                      limitsCheckPassed = false;
-                      rejectionReason = `Max account balance exceeded: would be ₦${newBalance.toFixed(2)} > ₦${limits.maxAccountBalance.toFixed(2)}`;
-                    }
-                  }
-                }
-              } else {
-                console.warn(
-                  `[Limit] Tier limits not found for tier ${userTier}`,
-                );
-              }
-            } else {
-              console.log(
-                `[Limit] User ${resolvedUid} has no valid tier (${userTier}) – skipping limits`,
-              );
-            }
-          } catch (limitErr) {
-            console.error(
-              "[SafeHaven webhook] Error during limit checks:",
-              limitErr,
-            );
-            limitsCheckPassed = false;
-            rejectionReason =
-              "Internal error during limit check – admin review required";
-          }
-
-          if (!limitsCheckPassed) {
-            await db.collection("pendingCreditReviews").add({
-              type: "credit_limit_violation",
-              receivedAt: admin.firestore.FieldValue.serverTimestamp(),
-              userId: resolvedUid,
-              userTier,
-              amount: amountRaw,
-              senderName,
-              sessionId,
-              creditAccountNumber,
-              senderAccountNumber,
-              senderBankCode,
-              violationReason: rejectionReason,
-              rawPayload: payload,
-              status: "PENDING_REVIEW",
-              recommendedAction: "MANUAL_CREDIT_REVIEW",
-            });
-            console.log(
-              `[SafeHaven webhook] Limit violation – saved to pendingCreditReviews: ${rejectionReason}`,
-            );
-            return;
-          }
-
-          // ---- All checks passed - process deposit ----
-          const userData =
-            (await db.collection("users").doc(resolvedUid).get()).data() || {};
-          const deviceToken = userData.deviceToken || null;
-          const userEmail = userData.email || null;
-
-          console.log(
-            `[SafeHaven webhook] Limits passed – creating deposit for user ${resolvedUid}`,
-          );
-
-          await db.collection("transactions").add({
-            userId: resolvedUid,
-            type: "deposit",
-            amount: amountRaw,
-            reference: sessionId,
-            status: "SUCCESSFUL",
-            senderName,
-            timestamp: admin.firestore.FieldValue.serverTimestamp(),
-          });
-
-          await tryMatchAndSettleStorefrontOrder({
-            merchantUid: resolvedUid,
-            payment: payload,
-          });
-
-          if (deviceToken) {
-            try {
-              await admin.messaging().send({
-                token: deviceToken,
-                notification: {
-                  title: "Payment Received",
-                  body: `You received ₦${amountDisplay} from ${senderName}`,
-                },
-                ...FCM_CHANNEL,
-              });
-            } catch (msgErr) {
-              console.error("FCM error:", msgErr);
-            }
-          }
-          await saveNotification(resolvedUid, {
-            title: "Payment Received",
-            body: `You received ₦${amountDisplay} from ${senderName}`,
-            type: "payment_received",
-            amount: amountRaw,
-          });
-          if (userEmail) {
-            try {
-              await sendNotifyEmail({
-                to: userEmail,
-                subject: "Credit Received – PadiPay",
-                html: `<p>You received ₦${amountDisplay} from ${senderName}.</p>`,
-                text: `You received ₦${amountDisplay} from ${senderName}.`,
-              });
-            } catch (emailErr) {
-              console.error("Email error:", emailErr);
-            }
-          }
-        }
-        // ----- ACCOUNT.DEBIT EVENT (fixed) -----
-        else if (
-          evtType &&
-          evtType.toString().toLowerCase() === "account.debit"
-        ) {
-          const payload = parsed.data || parsed;
-
-          console.log("[SafeHaven webhook] account.debit received", {
-            sessionId: payload.sessionId,
-            amount: payload.amount,
-            status: payload.status,
-            debitAccount: payload.debitAccountNumber,
-            _id: payload._id,
-          });
-
-          const sessionId = String(payload.sessionId || "").trim();
-          const providerRef = String(
-            payload.paymentReference || payload._id || "",
-          ).trim();
-
-          if (!sessionId) {
-            console.warn(
-              "[SafeHaven webhook] account.debit: Missing sessionId",
-            );
-            return;
-          }
-
-          const debitAccountNumber = String(
-            payload.debitAccountNumber || payload.accountNumber || "",
-          ).trim();
-
-          if (!debitAccountNumber) {
-            console.warn(
-              "[SafeHaven webhook] account.debit: missing debitAccountNumber",
-            );
-            return;
-          }
-
-          // ====================== USER / COMPANY LOOKUP ======================
-          let resolvedUid = null;
-          let isCompanyDebit = false;
-
-          try {
-            // Check if it's company account first
-            const companyDoc = await db
-              .collection("company")
-              .doc("safehavenAccountDetails")
-              .get();
-
-            if (companyDoc.exists) {
-              const companyData = companyDoc.data() || {};
-              const companyAccountNumber =
-                companyData.safehavenAccountNumber || "";
-
-              if (companyAccountNumber === debitAccountNumber) {
-                isCompanyDebit = true;
-                resolvedUid = "company";
-                console.log(
-                  `[SafeHaven webhook] Debit from COMPANY account ${debitAccountNumber}`,
-                );
-              }
-            }
-
-            // If not company, check user accounts
-            if (!isCompanyDebit) {
-              const queries = [
-                db
-                  .collection("users")
-                  .where("safehavenAccountNumber", "==", debitAccountNumber),
-                db
-                  .collection("users")
-                  .where(
-                    "safehavenData.virtualAccount.data.attributes.accountNumber",
-                    "==",
-                    debitAccountNumber,
-                  ),
-                db
-                  .collection("safehavenUserSetup")
-                  .where("safehavenAccountNumber", "==", debitAccountNumber),
-              ];
-
-              for (const q of queries) {
-                const snap = await q.limit(1).get();
-                if (!snap.empty) {
-                  resolvedUid = snap.docs[0].id;
-                  break;
-                }
-              }
-            }
-          } catch (e) {
-            console.error("[SafeHaven webhook] User lookup failed", e);
-          }
-
-          if (!resolvedUid) {
-            console.log(
-              `[SafeHaven webhook] User/Company not found for debit account ${debitAccountNumber}`,
-            );
-            return;
-          }
-
-          // ====================== COMPANY DEBIT ======================
-          if (isCompanyDebit) {
-            await db.collection("companyTransactions").add({
-              type: "debit",
-              amount: Number(payload.amount || 0),
-              reference: sessionId,
-              recipientAccount: String(payload.creditAccountNumber || ""),
-              recipientName: String(payload.creditAccountName || ""),
-              narration: payload.narration || "Transfer",
-              timestamp: admin.firestore.FieldValue.serverTimestamp(),
-              fullData: payload,
-            });
-
-            console.log(
-              `[SafeHaven webhook] Company debit logged: ₦${payload.amount} to ${payload.creditAccountNumber}`,
-            );
-            return;
-          }
-
-          // ====================== USER DEBIT ======================
-          // Duplicate check
-          const duplicateCheck = await db
-            .collection("transactions")
-            .where("userId", "==", resolvedUid)
-            .where("reference", "in", [sessionId, providerRef].filter(Boolean))
-            .limit(1)
-            .get();
-
-          if (!duplicateCheck.empty) {
-            console.log(
-              `[SafeHaven webhook] Debit transaction already exists. Skipping. sessionId: ${sessionId}`,
-            );
-            return;
-          }
-
-          // Process amounts
-          const amountRaw = Number(payload.amount || 0);
-          const fees = Number(payload.fees || 0);
-          const vat = Number(payload.vat || 0);
-          const stampDuty = Number(payload.stampDuty || 0);
-          const totalAmount = amountRaw + fees + vat + stampDuty;
-
-          const recipientName = String(
-            payload.creditAccountName || "Unknown",
-          ).trim();
-
-          // For account.debit webhook → treat as SUCCESSFUL
-          const transactionStatus = "SUCCESSFUL";
-          console.log(
-            "[SafeHaven webhook] Preparing to save transaction with:",
-          );
-          console.log(`  - safehavenId: ${payload._id}`);
-          console.log(`  - reference (sessionId): ${sessionId}`);
-          console.log(`  - paymentReference: ${providerRef}`);
-          console.log(`  - userId: ${resolvedUid}`);
-          console.log(`  - amount: ${amountRaw}`);
-
-          // Save transaction
-          const docRef = await db.collection("transactions").add({
-            userId: resolvedUid,
-            type: "transfer",
-            amount: amountRaw,
-            safehavenId: payload._id, // <-- this is the key
-            totalAmount: totalAmount,
-            fees: fees,
-            vat: vat,
-            stampDuty: stampDuty,
-            reference: sessionId,
-            paymentReference: providerRef,
-            status: transactionStatus,
-            recipientName: recipientName,
-            recipientAccount: String(payload.creditAccountNumber || ""),
-            narration: payload.narration || "Transfer",
-            provider: payload.provider || "NIBSS",
-            providerChannel: payload.providerChannel || "NIP",
-            timestamp: admin.firestore.FieldValue.serverTimestamp(),
-            fullData: payload,
-            isOutgoing: true,
-            sessionId: sessionId,
-          });
-
-          console.log(
-            `✅ [SafeHaven webhook] Transaction saved with document ID: ${docRef.id}`,
-          );
-          console.log(
-            `   Fields: safehavenId=${payload._id}, reference=${sessionId}, paymentReference=${providerRef}`,
-          );
-
-          // Send Push Notification
-          const userSnap = await db.collection("users").doc(resolvedUid).get();
-          const userData = userSnap.data() || {};
-          const deviceToken = userData.deviceToken;
-
-          if (deviceToken) {
-            try {
-              await admin.messaging().send({
-                token: deviceToken,
-                notification: {
-                  title: "Transfer Sent",
-                  body: `₦${amountRaw.toLocaleString()} sent to ${recipientName}`,
-                },
-              });
-            } catch (e) {
-              console.error("FCM error for debit:", e);
-            }
-          }
-
-          // Save in-app notification
-          await saveNotification(resolvedUid, {
-            title: "Transfer Sent",
-            body: `You sent ₦${amountRaw.toLocaleString()} to ${recipientName}`,
-            type: "transfer_sent",
-            amount: amountRaw,
-            status: transactionStatus,
-          });
-        }
-        // ----- end events -----
-      } catch (postErr) {
-        console.error("SafeHaven webhook post-processing error:", postErr);
-      }
-    })();
-
-    return res.status(200).send("OK");
+    if (response.ok) {
+      console.log(
+        `[SafeHaven webhook] Forwarded to efix webhook endpoint: ${response.status}`,
+      );
+      return true;
+    } else {
+      console.error(
+        `[SafeHaven webhook] Efix forward failed (${response.status}):`,
+        await response.text(),
+      );
+      return false;
+    }
   } catch (err) {
-    console.error("[SafeHaven webhook] processing error:", err);
-    return res.status(400).json({ error: "Invalid payload" });
+    console.error("[SafeHaven webhook] Efix forward error:", err.message);
+    return false;
   }
-});
+};
+
+
+
 
 // Anchor webhook (existing root handler)
 app.post("/", async (req, res) => {
@@ -8934,6 +8247,677 @@ exports.safehavenPurchaseVas = onCallLogged(
     };
   },
 );
+
+// ─── HTTP SafeHaven Functions for Flutter App ──────────────────────────────────
+
+// Helper function to authenticate Firebase users in HTTP requests using email
+const authenticateFirebaseUser = async (req) => {
+  const userEmail = req.headers['x-user-email'] || req.body.userEmail;
+  if (!userEmail) {
+    throw new Error('Missing user email for authentication');
+  }
+
+  try {
+    // Get user by email to verify they exist
+    const userRecord = await admin.auth().getUserByEmail(userEmail);
+    return {
+      uid: userRecord.uid,
+      email: userRecord.email,
+      emailVerified: userRecord.emailVerified
+    };
+  } catch (error) {
+    throw new Error('Invalid user email or user does not exist');
+  }
+};
+
+// HTTP endpoint for creating SafeHaven sub-account
+exports.safehavenCreateSubAccountHttp = onRequest(
+  {
+    secrets: [
+      safehavenClientId,
+      safehavenPrivateKey,
+      safehavenCompanyUrl,
+      safehavenDebitAccountNumber,
+    ],
+  },
+  async (req, res) => {
+    cors({ origin: true })(req, res, async () => {
+      try {
+        if (req.method !== "POST") {
+          return res.status(405).json({ error: "Method not allowed" });
+        }
+
+        // Authenticate Firebase user
+        const decodedToken = await authenticateFirebaseUser(req);
+        const uid = decodedToken.uid;
+
+        const idempotencyKey = req.body.idempotencyKey || `PADIPAY-${Date.now()}`;
+
+        const setupPatch = {
+          firstName: String(req.body.firstName || "").trim(),
+          lastName: String(req.body.lastName || "").trim(),
+          email: String(req.body.email || "").trim(),
+          phoneNumber: String(req.body.phoneNumber || "").trim(),
+          country: String(req.body.country || "NG").trim() || "NG",
+          state: String(req.body.state || "").trim(),
+          addressLine1: String(req.body.addressLine1 || "").trim(),
+          city: String(req.body.city || "").trim(),
+          postalCode: String(req.body.postalCode || "").trim(),
+          bvn: String(req.body.bvn || "").trim(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        };
+
+        await db
+          .collection("safehavenUserSetup")
+          .doc(uid)
+          .set(setupPatch, { merge: true });
+
+        // Read user info stored for subaccount creation.
+        const setupDoc = await db.collection("safehavenUserSetup").doc(uid).get();
+        const setup = setupDoc.exists ? setupDoc.data() : {};
+
+        const requestedIdentityId = String(req.body.identityId || "").trim();
+        const setupIdentityId = String(
+          setup.identityId || setup.identityVerification?.identityId || "",
+        ).trim();
+
+        // If the webhook already marked this identityId as FAILED, discard it so
+        // we fall through to the BVN fallback path without a wasted 500 round-trip.
+        const storedIdentityStatus = String(setup.identityCheckStatus || "")
+          .trim()
+          .toUpperCase();
+        const rawResolvedId = requestedIdentityId || setupIdentityId;
+        const resolvedIdentityId =
+          storedIdentityStatus === "FAILED" && !requestedIdentityId
+            ? ""
+            : rawResolvedId;
+
+        const requestedIdentityType = String(req.body.identityType || "").trim();
+        const requestedCustomerType = String(req.body.type || "").trim();
+        const normalizedCustomerType = requestedCustomerType.toLowerCase();
+        const isBusinessCustomer =
+          normalizedCustomerType === "businesscustomer" ||
+          normalizedCustomerType === "business" ||
+          normalizedCustomerType === "corporate";
+        const resolvedIdentityType =
+          requestedIdentityType || (resolvedIdentityId ? "vID" : "BVN");
+
+        const externalReference =
+          String(req.body.externalReference || idempotencyKey).trim() ||
+          idempotencyKey;
+        const autoSweep = Boolean(req.body.autoSweep);
+        const autoSweepDetails =
+          req.body.autoSweepDetails &&
+          typeof req.body.autoSweepDetails === "object"
+            ? req.body.autoSweepDetails
+            : null;
+
+        // Normalize phone number to match working format (remove country code, dashes)
+        let normalizedPhoneNumber = String(setup.phoneNumber || "").trim();
+        // Remove country code 234 if present
+        if (normalizedPhoneNumber.startsWith("234")) {
+          normalizedPhoneNumber = normalizedPhoneNumber.substring(3);
+        }
+        // Remove any dashes or spaces
+        normalizedPhoneNumber = normalizedPhoneNumber.replace(/[-\s]/g, "");
+        // Ensure it starts with 0 for Nigerian numbers
+        if (!normalizedPhoneNumber.startsWith("0") && normalizedPhoneNumber.length === 10) {
+          normalizedPhoneNumber = "0" + normalizedPhoneNumber;
+        }
+
+        const subAccountBody = {
+          phoneNumber: normalizedPhoneNumber,
+          emailAddress: setup.email,
+          externalReference,
+          autoSweep,
+          firstName: setup.firstName,
+          lastName: setup.lastName,
+          addressLine1: setup.addressLine1 || "",
+          city: setup.city || "",
+          state: setup.state || "",
+          country: setup.country,
+          postalCode: setup.postalCode || "",
+        };
+
+        if (!isBusinessCustomer) {
+          subAccountBody.identityType = resolvedIdentityType;
+        }
+
+        if (resolvedIdentityId) {
+          subAccountBody.identityId = resolvedIdentityId;
+        } else if (!isBusinessCustomer && setup.bvn) {
+          subAccountBody.identityType = "BVN";
+          subAccountBody.identityId = setup.bvn;
+        }
+
+        if (!subAccountBody.phoneNumber) {
+          return res.status(400).json({
+            error: "phoneNumber is required to create subaccount",
+          });
+        }
+
+        if (!subAccountBody.emailAddress) {
+          return res.status(400).json({
+            error: "email is required to create subaccount",
+          });
+        }
+
+        if (!isBusinessCustomer && !resolvedIdentityId && !setup.bvn) {
+          return res.status(400).json({
+            error:
+              "Missing identityId or BVN. Please verify your identity before creating a subaccount.",
+          });
+        }
+
+        console.log("[safehavenCreateSubAccountHttp] payload", subAccountBody);
+
+        const resp = await safehavenRequest({
+          path: "/accounts/subaccount",
+          method: "POST",
+          body: subAccountBody,
+        });
+
+        // Store the created account
+        const accountData = resp?.data || resp;
+        if (accountData?.accountId) {
+          await db.collection("safehavenUserSetup").doc(uid).set(
+            {
+              accountId: accountData.accountId,
+              accountNumber: accountData.accountNumber,
+              bankCode: accountData.bankCode,
+              bankName: accountData.bankName,
+              accountName: accountData.accountName,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            },
+            { merge: true },
+          );
+        }
+
+        return res.status(200).json(resp);
+      } catch (err) {
+        console.error("safehavenCreateSubAccountHttp error", err);
+        return res
+          .status(500)
+          .json({ error: err.message || "Internal server error" });
+      }
+    });
+  },
+);
+
+// HTTP endpoint for SafeHaven identity verification initiation
+exports.safehavenInitiateIdentityVerificationHttp = onRequest(
+  {
+    secrets: [
+      safehavenClientId,
+      safehavenPrivateKey,
+      safehavenCompanyUrl,
+      safehavenDebitAccountNumber,
+    ],
+  },
+  async (req, res) => {
+    cors({ origin: true })(req, res, async () => {
+      try {
+        if (req.method !== "POST") {
+          return res.status(405).json({ error: "Method not allowed" });
+        }
+
+        // Authenticate Firebase user
+        const decodedToken = await authenticateFirebaseUser(req);
+        const uid = decodedToken.uid;
+
+        const type = String(req.body.type || "").trim().toUpperCase();
+        const number = String(req.body.number || "").trim();
+
+        if (!type || !["BVN", "NIN", "BVNUSSD", "VNIN", "VID"].includes(type)) {
+          return res.status(400).json({ error: "Valid type is required (BVN, NIN, BVNUSSD, VNIN, or VID)" });
+        }
+
+        if (!number) {
+          return res.status(400).json({ error: "number is required" });
+        }
+
+        const setupDoc = await db.collection("safehavenUserSetup").doc(uid).get();
+        const setup = setupDoc.exists ? setupDoc.data() : {};
+        const configuredDebitAccount = await _getSafehavenDebitAccountConfig();
+        let debitAccountNumber = String(
+          req.body.debitAccountNumber ||
+            setup.safehavenAccountNumber ||
+            configuredDebitAccount.debitAccountNumber ||
+            "",
+        ).trim();
+
+        // Auto-resolve company main account number when not supplied
+        if (!debitAccountNumber || configuredDebitAccount.source === "sandbox-default") {
+          try {
+            const accountsResp = await safehavenRequest({
+              path: "/accounts?isSubAccount=false&page=0&limit=1",
+              method: "GET",
+            });
+            const rootData = accountsResp?.data;
+            const candidateList = Array.isArray(rootData)
+              ? rootData
+              : Array.isArray(rootData?.data)
+                ? rootData.data
+                : Array.isArray(rootData?.accounts)
+                  ? rootData.accounts
+                  : Array.isArray(rootData?.result)
+                    ? rootData.result
+                    : [];
+
+            const firstAccount = candidateList[0] || rootData;
+            const resolved = String(firstAccount?.accountNumber || "").trim();
+            if (resolved) {
+              debitAccountNumber = resolved;
+            }
+          } catch (fetchErr) {
+            console.warn("Could not auto-resolve company account:", fetchErr.message);
+          }
+        }
+
+        if (!debitAccountNumber) {
+          return res.status(400).json({ error: "debitAccountNumber is required to initiate identity verification" });
+        }
+
+        const callbackUrl = String(
+          req.body.callbackUrl ||
+          req.body.webhookUrl ||
+          process.env.SAFEHAVEN_IDENTITY_CALLBACK_URL ||
+          process.env.SAFEHAVEN_IDENTITY_WEBHOOK_URL ||
+          "",
+        ).trim();
+        if (callbackUrl && !isValidHttpsUrl(callbackUrl)) {
+          return res.status(400).json({ error: "callbackUrl must be a valid HTTPS URL" });
+        }
+
+        const requestBody = {
+          type,
+          number,
+          debitAccountNumber,
+          async: true, // Always use async mode for HTTP
+        };
+        if (callbackUrl) {
+          requestBody.callbackUrl = callbackUrl;
+        }
+
+        const resp = await safehavenRequest({
+          path: "/identity/v2",
+          method: "POST",
+          body: requestBody,
+        });
+
+        const verification = resp.data || {};
+        const identityId = String(
+          verification._id || verification.id || verification.identityId || "",
+        ).trim();
+
+        await db
+          .collection("safehavenUserSetup")
+          .doc(uid)
+          .set(
+            {
+              identityVerification: {
+                identityId: identityId || null,
+                type,
+                number,
+                status: verification.status || "PENDING",
+                source: "padipay", // Mark as padipay-initiated (mobile app / Firebase path)
+                initiatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                rawInitiate: verification,
+              },
+              identityId: identityId || null,
+              identityType: identityId ? "vID" : setup.identityType || null,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            },
+            { merge: true },
+          );
+
+        return res.status(200).json({
+          identityId: identityId || null,
+          type,
+          status: verification.status || "PENDING",
+          _safehaven: verification,
+        });
+      } catch (err) {
+        console.error("safehavenInitiateIdentityVerificationHttp error", err);
+        return res
+          .status(500)
+          .json({ error: err.message || "Internal server error" });
+      }
+    });
+  },
+);
+
+// HTTP endpoint for SafeHaven identity verification validation
+exports.safehavenValidateIdentityVerificationHttp = onRequest(
+  {
+    secrets: [
+      safehavenClientId,
+      safehavenPrivateKey,
+      safehavenCompanyUrl,
+    ],
+  },
+  async (req, res) => {
+    cors({ origin: true })(req, res, async () => {
+      try {
+        if (req.method !== "POST") {
+          return res.status(405).json({ error: "Method not allowed" });
+        }
+
+        // Authenticate Firebase user
+        const decodedToken = await authenticateFirebaseUser(req);
+        const uid = decodedToken.uid;
+
+        const identityId = String(req.body.identityId || "").trim();
+        const type = String(req.body.type || "").trim().toUpperCase();
+        const otp = String(req.body.otp || "").trim();
+
+        if (!identityId) {
+          return res.status(400).json({ error: "identityId is required" });
+        }
+
+        if (!type || !["BVN", "NIN", "BVNUSSD", "VNIN", "VID"].includes(type)) {
+          return res.status(400).json({ error: "Valid type is required (BVN, NIN, BVNUSSD, VNIN, or VID)" });
+        }
+
+        if (!otp) {
+          return res.status(400).json({ error: "otp is required" });
+        }
+
+        const resp = await safehavenRequest({
+          path: "/identity/v2/validate",
+          method: "POST",
+          body: {
+            identityId,
+            type,
+            otp,
+          },
+        });
+
+        const verification = resp.data || {};
+        const resolvedIdentityId = String(
+          verification._id || verification.identityId || identityId,
+        ).trim();
+
+        await db
+          .collection("safehavenUserSetup")
+          .doc(uid)
+          .set(
+            {
+              identityVerification: {
+                identityId: resolvedIdentityId,
+                type,
+                status: verification.status || "VALIDATED",
+                validatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                rawValidate: verification,
+              },
+              identityId: resolvedIdentityId,
+              identityType: "vID",
+              identityCheckStatus: "SUCCESS",
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            },
+            { merge: true },
+          );
+
+        return res.status(200).json({
+          identityId: resolvedIdentityId,
+          identityType: "vID",
+          status: verification.status || "VALIDATED",
+          _safehaven: verification,
+        });
+      } catch (err) {
+        console.error("safehavenValidateIdentityVerificationHttp error", err);
+        return res
+          .status(500)
+          .json({ error: err.message || "Internal server error" });
+      }
+    });
+  },
+);
+
+// HTTP endpoint for fetching SafeHaven account details
+exports.safehavenFetchAccountDetailsHttp = onRequest(
+  {
+    secrets: [
+      safehavenClientId,
+      safehavenPrivateKey,
+      safehavenCompanyUrl,
+    ],
+  },
+  async (req, res) => {
+    cors({ origin: true })(req, res, async () => {
+      try {
+        if (req.method !== "GET") {
+          return res.status(405).json({ error: "Method not allowed" });
+        }
+
+        // Authenticate Firebase user
+        await authenticateFirebaseUser(req);
+
+        const accountNumber = req.query.accountNumber;
+        if (!accountNumber) {
+          return res.status(400).json({ error: "Account number is required" });
+        }
+
+        const resp = await safehavenRequest({
+          path: `/accounts/${encodeURIComponent(accountNumber)}`,
+          method: "GET",
+        });
+
+        return res.status(200).json(resp);
+      } catch (err) {
+        console.error("safehavenFetchAccountDetailsHttp error", err);
+        return res
+          .status(500)
+          .json({ error: err.message || "Internal server error" });
+      }
+    });
+  },
+);
+
+// HTTP endpoint for SafeHaven NIP transfer
+exports.safehavenTransferNipHttp = onRequest(
+  {
+    secrets: [
+      safehavenClientId,
+      safehavenPrivateKey,
+      safehavenCompanyUrl,
+    ],
+  },
+  async (req, res) => {
+    cors({ origin: true })(req, res, async () => {
+      try {
+        if (req.method !== "POST") {
+          return res.status(405).json({ error: "Method not allowed" });
+        }
+
+        // Authenticate Firebase user
+        const decodedToken = await authenticateFirebaseUser(req);
+        const uid = decodedToken.uid;
+
+        const { amount, accountNumber, accountName, bankCode, reference } = req.body;
+        if (!amount || !accountNumber || !accountName || !bankCode || !reference) {
+          return res.status(400).json({
+            error: "amount, accountNumber, accountName, bankCode, and reference are required"
+          });
+        }
+
+        const acctInfo = await _getSafehavenAccountForUser(uid);
+        if (!acctInfo?.accountNumber) {
+          return res.status(400).json({ error: "Virtual account not set up" });
+        }
+
+        const transferBody = {
+          amount: amount / 100, // Convert kobo to naira
+          debitAccountNumber: acctInfo.accountNumber,
+          creditAccountNumber: accountNumber,
+          creditAccountName: accountName,
+          creditBankCode: bankCode,
+          reference,
+        };
+
+        console.log("[safehavenTransferNipHttp] payload", transferBody);
+
+        const resp = await safehavenRequest({
+          path: "/transfers/nip",
+          method: "POST",
+          body: transferBody,
+        });
+
+        return res.status(200).json(resp);
+      } catch (err) {
+        console.error("safehavenTransferNipHttp error", err);
+        return res
+          .status(500)
+          .json({ error: err.message || "Internal server error" });
+      }
+    });
+  },
+);
+
+// HTTP endpoint for SafeHaven intra transfer
+exports.safehavenTransferIntraHttp = onRequest(
+  {
+    secrets: [
+      safehavenClientId,
+      safehavenPrivateKey,
+      safehavenCompanyUrl,
+    ],
+  },
+  async (req, res) => {
+    cors({ origin: true })(req, res, async () => {
+      try {
+        if (req.method !== "POST") {
+          return res.status(405).json({ error: "Method not allowed" });
+        }
+
+        // Authenticate Firebase user
+        const decodedToken = await authenticateFirebaseUser(req);
+        const uid = decodedToken.uid;
+
+        const { amount, accountNumber, reference } = req.body;
+        if (!amount || !accountNumber || !reference) {
+          return res.status(400).json({
+            error: "amount, accountNumber, and reference are required"
+          });
+        }
+
+        const acctInfo = await _getSafehavenAccountForUser(uid);
+        if (!acctInfo?.accountNumber) {
+          return res.status(400).json({ error: "Virtual account not set up" });
+        }
+
+        const transferBody = {
+          amount: amount / 100, // Convert kobo to naira
+          debitAccountNumber: acctInfo.accountNumber,
+          creditAccountNumber: accountNumber,
+          reference,
+        };
+
+        console.log("[safehavenTransferIntraHttp] payload", transferBody);
+
+        const resp = await safehavenRequest({
+          path: "/transfers/intra",
+          method: "POST",
+          body: transferBody,
+        });
+
+        return res.status(200).json(resp);
+      } catch (err) {
+        console.error("safehavenTransferIntraHttp error", err);
+        return res
+          .status(500)
+          .json({ error: err.message || "Internal server error" });
+      }
+    });
+  },
+);
+
+// HTTP endpoint for getting SafeHaven banks
+exports.safehavenBankListHttp = onRequest(
+  {
+    secrets: [
+      safehavenClientId,
+      safehavenPrivateKey,
+      safehavenCompanyUrl,
+    ],
+  },
+  async (req, res) => {
+    cors({ origin: true })(req, res, async () => {
+      try {
+        if (req.method !== "GET") {
+          return res.status(405).json({ error: "Method not allowed" });
+        }
+
+        // Authenticate Firebase user
+        await authenticateFirebaseUser(req);
+
+        const resp = await safehavenRequest({
+          path: "/banks",
+          method: "GET",
+        });
+
+        return res.status(200).json(resp?.data || []);
+      } catch (err) {
+        console.error("safehavenBankListHttp error", err);
+        return res
+          .status(500)
+          .json({ error: err.message || "Internal server error" });
+      }
+    });
+  },
+);
+
+// HTTP endpoint for fetching SafeHaven account balance by account ID or account number
+exports.safehavenFetchAccountBalanceHttp = onRequest(
+  {
+    secrets: [
+      safehavenClientId,
+      safehavenPrivateKey,
+      safehavenCompanyUrl,
+    ],
+  },
+  async (req, res) => {
+    cors({ origin: true })(req, res, async () => {
+      try {
+        if (req.method !== "GET") {
+          return res.status(405).json({ error: "Method not allowed" });
+        }
+
+        const accountId = String(req.query.accountId || "").trim();
+        const accountNumber = String(req.query.accountNumber || "").trim();
+        const accountKey = accountId || accountNumber;
+
+        if (!accountKey) {
+          return res.status(400).json({ error: "accountId or accountNumber is required" });
+        }
+
+        const resp = await safehavenRequest({
+          path: `/accounts/${encodeURIComponent(accountKey)}`,
+          method: "GET",
+        });
+
+        const acct = resp.data || {};
+        const balanceKobo = Math.round((acct.accountBalance ?? 0) * 100);
+        const ledgerKobo = Math.round((acct.ledgerBalance ?? acct.accountBalance ?? 0) * 100);
+
+        return res.status(200).json({
+          data: {
+            availableBalance: balanceKobo,
+            ledgerBalance: ledgerKobo,
+            accountNumber: acct.accountNumber || accountNumber || "",
+            currency: acct.currency || "NGN",
+          },
+        });
+      } catch (err) {
+        console.error("safehavenFetchAccountBalanceHttp error", err);
+        return res
+          .status(500)
+          .json({ error: err.message || "Internal server error" });
+      }
+    });
+  },
+);
+
 exports.sendTransactionNotification = onCall(
   { secrets: [getanchorSecretKey] },
   async (data, context) => {
