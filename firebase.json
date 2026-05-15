@@ -14,5 +14,29 @@
         "npm --prefix functions run lint"
       ]
     }
-  ]
+  ],
+  "hosting": {
+    "public": "public",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "rewrites": [
+      {
+        "source": "/v1/**",
+        "function": {
+          "functionId": "externalApi",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/v1",
+        "function": {
+          "functionId": "externalApi",
+          "region": "us-central1"
+        }
+      }
+    ]
+  }
 }

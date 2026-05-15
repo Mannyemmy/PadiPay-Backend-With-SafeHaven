@@ -86,7 +86,9 @@ const RATE_LIMIT = {
 };
 
 const API_VERSION = "v1";
-const BASE_PATH = `/`;
+const API_BASE_PATHS = [`/${API_VERSION}`, ""];
+
+const apiPath = (basePath, path) => `${basePath}${path}`;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -1155,28 +1157,30 @@ const registerExternalApi = (deps) => {
   const rateLimitMiddleware = makeRateLimitMiddleware(_incrRateLimit);
   const loggingMiddleware = makeLoggingMiddleware(db, admin);
 
-  // Public endpoints (no auth needed)
-  externalApp.get(`${BASE_PATH}/health`, (_req, res) => {
-    res.json({ status: "ok", version: API_VERSION, timestamp: new Date().toISOString() });
-  });
+  for (const basePath of API_BASE_PATHS) {
+    // Public endpoints (no auth needed)
+    externalApp.get(apiPath(basePath, "/health"), (_req, res) => {
+      res.json({ status: "ok", version: API_VERSION, timestamp: new Date().toISOString() });
+    });
 
-  // Apply auth + rate limiting + logging to all protected routes
-  externalApp.use(BASE_PATH, authMiddleware, rateLimitMiddleware, loggingMiddleware);
+    // Apply auth + rate limiting + logging to all protected routes
+    externalApp.use(basePath || "/", authMiddleware, rateLimitMiddleware, loggingMiddleware);
 
-  // Account routes
-  externalApp.post(`${BASE_PATH}/accounts`, handleCreateAccount(db, admin, safehavenRequest));
-  externalApp.get(`${BASE_PATH}/accounts/:accountNumber`, handleGetAccount(db, admin, safehavenRequest));
+    // Account routes
+    externalApp.post(apiPath(basePath, "/accounts"), handleCreateAccount(db, admin, safehavenRequest));
+    externalApp.get(apiPath(basePath, "/accounts/:accountNumber"), handleGetAccount(db, admin, safehavenRequest));
 
-  // Transfer routes
-  externalApp.post(`${BASE_PATH}/transfers/nip`, handleNipTransfer(db, admin, safehavenRequest, _incrRateLimit));
-  externalApp.post(`${BASE_PATH}/transfers/intra`, handleIntraTransfer(db, admin, safehavenRequest, _incrRateLimit));
-  externalApp.get(`${BASE_PATH}/transfers/:reference`, handleGetTransaction(db));
+    // Transfer routes
+    externalApp.post(apiPath(basePath, "/transfers/nip"), handleNipTransfer(db, admin, safehavenRequest, _incrRateLimit));
+    externalApp.post(apiPath(basePath, "/transfers/intra"), handleIntraTransfer(db, admin, safehavenRequest, _incrRateLimit));
+    externalApp.get(apiPath(basePath, "/transfers/:reference"), handleGetTransaction(db));
 
-  // Utility routes
-  externalApp.get(`${BASE_PATH}/banks`, handleListBanks(db, admin, safehavenRequest));
-  externalApp.post(`${BASE_PATH}/verify/account`, handleVerifyAccount(db, safehavenRequest));
-  externalApp.post(`${BASE_PATH}/verify/bvn`, handleVerifyBvn(qoreIdClientId, qoreIdApiKey));
-  externalApp.put(`${BASE_PATH}/webhooks`, handleUpdateWebhook(db, admin));
+    // Utility routes
+    externalApp.get(apiPath(basePath, "/banks"), handleListBanks(db, admin, safehavenRequest));
+    externalApp.post(apiPath(basePath, "/verify/account"), handleVerifyAccount(db, safehavenRequest));
+    externalApp.post(apiPath(basePath, "/verify/bvn"), handleVerifyBvn(qoreIdClientId, qoreIdApiKey));
+    externalApp.put(apiPath(basePath, "/webhooks"), handleUpdateWebhook(db, admin));
+  }
 
   // 404 catch-all for the external API
   externalApp.use((req, res) => {
