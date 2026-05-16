@@ -86,7 +86,7 @@ const RATE_LIMIT = {
 };
 
 const API_VERSION = "v1";
-const BASE_PATH = `/api/${API_VERSION}`;
+const BASE_PATH = `/${API_VERSION}`;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 

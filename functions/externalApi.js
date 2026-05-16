@@ -95,7 +95,7 @@ const apiPath = (basePath, path) => `${basePath}${path}`;
 const hashKey = (raw) =>
   crypto.createHash("sha256").update(String(raw)).digest("hex");
 
-const generateApiKey = (prefix = "pk_live") =>
+const generateApiKey = (prefix = "rf_live") =>
   `${prefix}_${crypto.randomBytes(32).toString("hex")}`;
 
 const jsonError = (res, status, message, code) =>
@@ -293,8 +293,8 @@ const makeAuthMiddleware = (db) => async (req, res, next) => {
   if (!raw) return jsonError(res, 401, "Missing API key", "unauthorized");
 
   // Determine mode from key prefix
-  const isTest = raw.startsWith("pk_test_");
-  const isLive = raw.startsWith("pk_live_");
+  const isTest = raw.startsWith("rf_test_");
+  const isLive = raw.startsWith("rf_live_");
   if (!isTest && !isLive) {
     return jsonError(res, 401, "Invalid API key format", "unauthorized");
   }
@@ -1079,20 +1079,22 @@ const makeProvisionHandler = (db, admin, masterKey) => async (req, res) => {
     return res.status(401).json({ error: "Invalid master key" });
   }
 
-  const { name, email, webhookUrl } = req.body || {};
+  const { name, email, webhookUrl, liveKey, testKey, webhookSecret } = req.body || {};
   if (!name || !email) return res.status(400).json({ error: "name and email are required" });
 
-  const liveKey = generateApiKey("pk_live");
-  const testKey = generateApiKey("pk_test");
-  const webhookSecret = crypto.randomBytes(32).toString("hex");
+  const finalLiveKey = typeof liveKey === "string" && liveKey.trim() ? String(liveKey).trim() : generateApiKey("rf_live");
+  const finalTestKey = typeof testKey === "string" && testKey.trim() ? String(testKey).trim() : generateApiKey("rf_test");
+  const finalWebhookSecret = typeof webhookSecret === "string" && webhookSecret.trim()
+    ? String(webhookSecret).trim()
+    : crypto.randomBytes(32).toString("hex");
 
   const docRef = await db.collection("apiClients").add({
     name: String(name).trim(),
     email: String(email).trim(),
     webhookUrl: webhookUrl || "",
-    webhookSecret,
-    keyHash: hashKey(liveKey),
-    testKeyHash: hashKey(testKey),
+    webhookSecret: finalWebhookSecret,
+    keyHash: hashKey(finalLiveKey),
+    testKeyHash: hashKey(finalTestKey),
     status: "active",
     allowedIps: [],
     createdAt: nowTs(admin),
@@ -1101,11 +1103,56 @@ const makeProvisionHandler = (db, admin, masterKey) => async (req, res) => {
 
   return res.status(201).json({
     clientId: docRef.id,
+    liveKey: finalLiveKey,
+    testKey: finalTestKey,
+    webhookSecret: finalWebhookSecret,
+    warning: "Store these credentials securely. The plain-text keys will not be shown again.",
+  });
+};
+
+const makeUpdateApiClientHandler = (db, admin, masterKey) => async (req, res) => {
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+  const provided = (req.headers["x-master-key"] || "").trim();
+  if (!provided || !crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(masterKey))) {
+    return res.status(401).json({ error: "Invalid master key" });
+  }
+
+  const {
+    clientId,
+    name,
+    email,
+    webhookUrl,
     liveKey,
     testKey,
     webhookSecret,
-    warning: "Store these credentials securely. The plain-text keys will not be shown again.",
-  });
+    status,
+  } = req.body || {};
+
+  if (!clientId || typeof clientId !== "string") {
+    return res.status(400).json({ error: "clientId is required" });
+  }
+
+  const docRef = db.collection("apiClients").doc(String(clientId));
+  const docSnap = await docRef.get();
+  if (!docSnap.exists) {
+    return res.status(404).json({ error: "apiClient not found" });
+  }
+
+  const patch = {
+    updatedAt: nowTs(admin),
+  };
+
+  if (typeof name === "string") patch.name = name.trim();
+  if (typeof email === "string") patch.email = email.trim();
+  if (typeof webhookUrl === "string") patch.webhookUrl = webhookUrl.trim();
+  if (typeof webhookSecret === "string") patch.webhookSecret = webhookSecret.trim();
+  if (typeof status === "string") patch.status = status.trim();
+  if (typeof liveKey === "string" && liveKey.trim()) patch.keyHash = hashKey(liveKey.trim());
+  if (typeof testKey === "string" && testKey.trim()) patch.testKeyHash = hashKey(testKey.trim());
+
+  await docRef.update(patch);
+  return res.status(200).json({ clientId: docRef.id, ...patch });
 };
 
 // ─── Registration ─────────────────────────────────────────────────────────────
@@ -1157,6 +1204,27 @@ const registerExternalApi = (deps) => {
   const rateLimitMiddleware = makeRateLimitMiddleware(_incrRateLimit);
   const loggingMiddleware = makeLoggingMiddleware(db, admin);
 
+  const adminEndpointProxy = async (req, res, handler) => {
+    const cors_ = require("cors");
+    cors_({ origin: false })(req, res, async () => {
+      const masterKey = externalApiMasterKey.value();
+      return handler(db, admin, masterKey)(req, res);
+    });
+  };
+
+  externalApp.post("/provisionApiClient", async (req, res) => {
+    return adminEndpointProxy(req, res, makeProvisionHandler);
+  });
+  externalApp.post("/updateApiClient", async (req, res) => {
+    return adminEndpointProxy(req, res, makeUpdateApiClientHandler);
+  });
+  externalApp.post("/v1/provisionApiClient", async (req, res) => {
+    return adminEndpointProxy(req, res, makeProvisionHandler);
+  });
+  externalApp.post("/v1/updateApiClient", async (req, res) => {
+    return adminEndpointProxy(req, res, makeUpdateApiClientHandler);
+  });
+
   for (const basePath of API_BASE_PATHS) {
     // Public endpoints (no auth needed)
     externalApp.get(apiPath(basePath, "/health"), (_req, res) => {
@@ -1197,6 +1265,7 @@ const registerExternalApi = (deps) => {
         safehavenDebitAccountNumber,
         qoreIdClientId,
         qoreIdApiKey,
+        externalApiMasterKey,
       ],
     },
     externalApp,
@@ -1213,6 +1282,19 @@ const registerExternalApi = (deps) => {
       });
     },
   );
+
+  exp.updateApiClient = onRequest(
+    { secrets: [externalApiMasterKey] },
+    async (req, res) => {
+      const cors_ = require("cors");
+      cors_({ origin: false })(req, res, async () => {
+        const masterKey = externalApiMasterKey.value();
+        return makeUpdateApiClientHandler(db, admin, masterKey)(req, res);
+      });
+    },
+  );
+
+  
 
   console.log("[externalApi] BaaS routes registered.");
 };
