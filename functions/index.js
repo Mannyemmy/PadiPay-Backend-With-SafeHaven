@@ -14626,6 +14626,62 @@ exports.sudoWebhook = onRequest(
 
         const found = await findUserByCardId(sudoCardId);
         if (!found) {
+          // Not a PadiPay user card. It may be a RootFi-issued card (RootFi
+          // shares this Sudo account). Forward the raw event to RootFi's
+          // bridge, which resolves the owning fintech and debits THAT
+          // fintech's RootFi account for the spend, then tells us
+          // approve/decline. RootFi cards never touch PadiPay user money.
+          try {
+            const bridgeResp = await fetch(
+              "https://api.rootfi.co/api/internal/card-event",
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "x-rootfi-bridge-secret": expectedSecret || "",
+                },
+                body: JSON.stringify(payload),
+              },
+            );
+            const bridgeJson = await bridgeResp
+              .json()
+              .catch(() => ({}));
+            if (
+              bridgeResp.ok &&
+              bridgeJson &&
+              bridgeJson.authorize === true
+            ) {
+              console.log(
+                "[sudoWebhook] RootFi card AUTHORIZED via bridge:",
+                sudoCardId,
+              );
+              return res
+                .status(200)
+                .json({ statusCode: 200, data: { responseCode: "00" } });
+            }
+            // RootFi recognised the card but declined (e.g. fintech has
+            // insufficient balance) -> decline as insufficient funds.
+            if (
+              bridgeJson &&
+              bridgeJson.authorize === false &&
+              bridgeJson.reason &&
+              bridgeJson.reason !== "unknown card"
+            ) {
+              console.log(
+                "[sudoWebhook] RootFi card DECLINED via bridge:",
+                sudoCardId,
+                bridgeJson.reason,
+              );
+              return res
+                .status(200)
+                .json({ statusCode: 200, data: { responseCode: "51" } });
+            }
+          } catch (bridgeErr) {
+            console.warn(
+              "[sudoWebhook] RootFi bridge error:",
+              bridgeErr && bridgeErr.message,
+            );
+          }
           console.warn(
             "[sudoWebhook] authorization.request: card not found:",
             sudoCardId,
